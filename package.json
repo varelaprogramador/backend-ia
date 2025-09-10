@@ -2,7 +2,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "commonjs",
-  "name": "ead10-backend",
+  "name": "INTEGRACAO - MATRA - I.Ackend",
   "main": "build/server.js",
   "description": "Backend da aplicação EAD10",
   "scripts": {
@@ -21,7 +21,7 @@
   "license": "UNLICENSED",
   "repository": {
     "type": "git",
-    "url": "https://github.com/MatraTecnologia/ead10-backend"
+    "url": "https://github.com/MatraTecnologia/INTEGRACAO - MATRA - I.Ackend"
   },
   "devDependencies": {
     "@faker-js/faker": "^9.9.0",

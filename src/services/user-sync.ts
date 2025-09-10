@@ -1,10 +1,8 @@
 import { clerkClient, type User } from '@clerk/fastify'
 
-import { redis } from '@/lib/redis'
+import { db } from '@/lib/db'
 import { logError, logInfo } from '@/utils/logger'
 
-const USERS_CACHE_KEY = 'users:list'
-const EMAIL_INDEX_KEY = 'users:email_index'
 const BATCH_SIZE = 50 // Parallel batch size
 const MAX_CONCURRENT_REQUESTS = 3 // Limit concurrent Clerk API calls
 
@@ -21,39 +19,52 @@ export class UserSyncService {
     return UserSyncService.instance
   }
 
-  async syncUsersWithCache(): Promise<void> {
+  async syncUsersWithDatabase(): Promise<{
+    added: number
+    updated: number
+    removed: number
+    errors: number
+  }> {
     if (this.isSyncing) {
       logInfo('User sync already in progress, skipping...')
-      return
+      return { added: 0, updated: 0, removed: 0, errors: 0 }
     }
 
     this.isSyncing = true
     const syncStartTime = Date.now()
 
     try {
-      logInfo('Starting user synchronization with cache...')
+      logInfo('Starting user synchronization with database...')
 
       // Fetch all users from Clerk
       const clerkUsers = await this.fetchAllUsersFromClerk()
       logInfo(`Fetched ${clerkUsers.length} users from Clerk`)
 
-      // Get current cached users
-      const cachedUsers = await this.getCachedUsers()
-      logInfo(`Found ${Object.keys(cachedUsers).length} users in cache`)
+      // Get current database users
+      const dbUsers = await this.getDatabaseUsers()
+      logInfo(`Found ${Object.keys(dbUsers).length} users in database`)
 
       // Sync users
-      const syncResult = await this.performSync(clerkUsers, cachedUsers)
+      const syncResult = await this.performSync(clerkUsers, dbUsers)
 
       const syncDuration = Date.now() - syncStartTime
       logInfo('User synchronization completed', {
         duration: `${syncDuration}ms`,
         ...syncResult,
       })
+
+      return syncResult
     } catch (error) {
-      logError('Failed to sync users with cache', error as Error)
+      logError('Failed to sync users with database', error as Error)
+      return { added: 0, updated: 0, removed: 0, errors: 1 }
     } finally {
       this.isSyncing = false
     }
+  }
+
+  // Legacy method for backwards compatibility
+  async syncUsersWithCache(): Promise<void> {
+    await this.syncUsersWithDatabase()
   }
 
   private async fetchAllUsersFromClerk(): Promise<User[]> {
@@ -98,31 +109,49 @@ export class UserSyncService {
     return users
   }
 
-  private async getCachedUsers(): Promise<Record<string, User>> {
+  private async getDatabaseUsers(): Promise<Record<string, User>> {
     try {
-      const cachedData = await redis.hgetall(USERS_CACHE_KEY)
-      const cachedUsers: Record<string, User> = {}
+      const dbUsers = await db.user.findMany()
+      const users: Record<string, User> = {}
 
-      for (const [userId, userJson] of Object.entries(cachedData)) {
-        try {
-          cachedUsers[userId] = JSON.parse(userJson) as User
-        } catch (parseError) {
-          logError(`Failed to parse cached user ${userId}`, parseError as Error)
-          // Remove invalid cached data
-          await redis.hdel(USERS_CACHE_KEY, userId)
-        }
+      for (const dbUser of dbUsers) {
+        users[dbUser.id] = {
+          id: dbUser.id,
+          firstName: dbUser.firstName,
+          lastName: dbUser.lastName,
+          imageUrl: dbUser.imageUrl,
+          hasImage: dbUser.hasImage,
+          primaryEmailAddressId: dbUser.primaryEmailId,
+          emailAddresses: dbUser.emailAddresses as any,
+          phoneNumbers: dbUser.phoneNumbers as any,
+          externalAccounts: dbUser.externalAccounts as any,
+          publicMetadata: dbUser.publicMetadata as any,
+          privateMetadata: dbUser.privateMetadata as any,
+          unsafeMetadata: dbUser.unsafeMetadata as any,
+          username: dbUser.username,
+          passwordEnabled: dbUser.passwordEnabled,
+          totpEnabled: dbUser.totpEnabled,
+          backupCodeEnabled: dbUser.backupCodeEnabled,
+          twoFactorEnabled: dbUser.twoFactorEnabled,
+          banned: dbUser.banned,
+          locked: dbUser.locked,
+          createdAt: dbUser.createdAt.getTime(),
+          updatedAt: dbUser.updatedAt.getTime(),
+          lastSignInAt: dbUser.lastSignInAt?.getTime() || null,
+          lastActiveAt: dbUser.lastActiveAt?.getTime() || null,
+        } as User
       }
 
-      return cachedUsers
+      return users
     } catch (error) {
-      logError('Failed to get cached users', error as Error)
+      logError('Failed to get database users', error as Error)
       return {}
     }
   }
 
   private async performSync(
     clerkUsers: User[],
-    cachedUsers: Record<string, User>,
+    dbUsers: Record<string, User>,
   ): Promise<{
     added: number
     updated: number
@@ -140,45 +169,70 @@ export class UserSyncService {
       clerkUsersMap.set(user.id, user)
     }
 
-    // OTIMIZAÇÃO: Usa pipeline para batch operations
-    const pipeline = redis.pipeline()
-    const operationsToAdd: { type: string, userId: string, user?: User }[] = []
+    // Process add/update operations
+    const usersToCreate: any[] = []
+    const usersToUpdate: { id: string; data: any }[] = []
 
-    // Prepare add/update operations
     for (const user of clerkUsers) {
       try {
-        const cachedUser = cachedUsers[user.id]
+        const dbUser = dbUsers[user.id]
 
-        if (!cachedUser) {
-          // User not in cache, add it
-          pipeline.hset(USERS_CACHE_KEY, user.id, JSON.stringify(user))
-          
-          // Add to email index
-          for (const emailAddr of user.emailAddresses || []) {
-            pipeline.hset(EMAIL_INDEX_KEY, emailAddr.emailAddress.toLowerCase(), user.id)
-          }
-          
-          operationsToAdd.push({ type: 'add', userId: user.id, user })
+        if (!dbUser) {
+          // User not in database, add it
+          usersToCreate.push({
+            id: user.id,
+            firstName: user.firstName,
+            lastName: user.lastName,
+            imageUrl: user.imageUrl,
+            hasImage: user.hasImage,
+            primaryEmailId: user.primaryEmailAddressId,
+            emailAddresses: user.emailAddresses,
+            phoneNumbers: user.phoneNumbers,
+            externalAccounts: user.externalAccounts,
+            publicMetadata: user.publicMetadata,
+            privateMetadata: user.privateMetadata,
+            unsafeMetadata: user.unsafeMetadata,
+            username: user.username,
+            passwordEnabled: user.passwordEnabled,
+            totpEnabled: user.totpEnabled,
+            backupCodeEnabled: user.backupCodeEnabled,
+            twoFactorEnabled: user.twoFactorEnabled,
+            banned: user.banned,
+            locked: user.locked,
+            lastSignInAt: user.lastSignInAt ? new Date(user.lastSignInAt) : null,
+            lastActiveAt: user.lastActiveAt ? new Date(user.lastActiveAt) : null,
+          })
           added++
         } else {
-          // Check if user data has changed (optimized)
-          const hasChanged = this.hasUserDataChanged(user, cachedUser)
+          // Check if user data has changed
+          const hasChanged = this.hasUserDataChanged(user, dbUser)
 
           if (hasChanged) {
-            pipeline.hset(USERS_CACHE_KEY, user.id, JSON.stringify(user))
-            
-            // Update email index (remove old, add new)
-            if (cachedUser.emailAddresses) {
-              for (const emailAddr of cachedUser.emailAddresses) {
-                pipeline.hdel(EMAIL_INDEX_KEY, emailAddr.emailAddress.toLowerCase())
-              }
-            }
-            
-            for (const emailAddr of user.emailAddresses || []) {
-              pipeline.hset(EMAIL_INDEX_KEY, emailAddr.emailAddress.toLowerCase(), user.id)
-            }
-            
-            operationsToAdd.push({ type: 'update', userId: user.id, user })
+            usersToUpdate.push({
+              id: user.id,
+              data: {
+                firstName: user.firstName,
+                lastName: user.lastName,
+                imageUrl: user.imageUrl,
+                hasImage: user.hasImage,
+                primaryEmailId: user.primaryEmailAddressId,
+                emailAddresses: user.emailAddresses,
+                phoneNumbers: user.phoneNumbers,
+                externalAccounts: user.externalAccounts,
+                publicMetadata: user.publicMetadata,
+                privateMetadata: user.privateMetadata,
+                unsafeMetadata: user.unsafeMetadata,
+                username: user.username,
+                passwordEnabled: user.passwordEnabled,
+                totpEnabled: user.totpEnabled,
+                backupCodeEnabled: user.backupCodeEnabled,
+                twoFactorEnabled: user.twoFactorEnabled,
+                banned: user.banned,
+                locked: user.locked,
+                lastSignInAt: user.lastSignInAt ? new Date(user.lastSignInAt) : null,
+                lastActiveAt: user.lastActiveAt ? new Date(user.lastActiveAt) : null,
+              },
+            })
             updated++
           }
         }
@@ -188,39 +242,51 @@ export class UserSyncService {
       }
     }
 
-    // Prepare remove operations  
-    for (const userId of Object.keys(cachedUsers)) {
+    // Find users to remove (exist in database but not in Clerk)
+    const usersToRemove: string[] = []
+    for (const userId of Object.keys(dbUsers)) {
       if (!clerkUsersMap.has(userId)) {
-        try {
-          pipeline.hdel(USERS_CACHE_KEY, userId)
-          
-          // Remove from email index
-          const cachedUser = cachedUsers[userId]
-          if (cachedUser.emailAddresses) {
-            for (const emailAddr of cachedUser.emailAddresses) {
-              pipeline.hdel(EMAIL_INDEX_KEY, emailAddr.emailAddress.toLowerCase())
-            }
-          }
-          
-          operationsToAdd.push({ type: 'remove', userId })
-          removed++
-        } catch (error) {
-          logError(`Failed to prepare removal of user ${userId}`, error as Error)
-          errors++
-        }
+        usersToRemove.push(userId)
+        removed++
       }
     }
 
-    // OTIMIZAÇÃO: Execute all operations in single pipeline
-    if (pipeline.length > 0) {
-      try {
-        await pipeline.exec()
-        logInfo(`Batch sync completed: ${operationsToAdd.length} operations executed`)
-      } catch (error) {
-        logError('Failed to execute batch sync pipeline', error as Error)
-        errors += operationsToAdd.length
-        added = updated = removed = 0
-      }
+    // Execute database operations in transaction
+    try {
+      await db.$transaction(async (tx) => {
+        // Create new users
+        if (usersToCreate.length > 0) {
+          await tx.user.createMany({
+            data: usersToCreate,
+            skipDuplicates: true,
+          })
+        }
+
+        // Update existing users
+        for (const userUpdate of usersToUpdate) {
+          await tx.user.update({
+            where: { id: userUpdate.id },
+            data: userUpdate.data,
+          })
+        }
+
+        // Remove users that no longer exist in Clerk
+        if (usersToRemove.length > 0) {
+          await tx.user.deleteMany({
+            where: {
+              id: {
+                in: usersToRemove,
+              },
+            },
+          })
+        }
+      })
+
+      logInfo(`Database sync completed: ${added} added, ${updated} updated, ${removed} removed`)
+    } catch (error) {
+      logError('Failed to execute database sync transaction', error as Error)
+      errors++
+      added = updated = removed = 0
     }
 
     return { added, updated, removed, errors }
@@ -274,31 +340,47 @@ export class UserSyncService {
     return JSON.stringify(metadata)
   }
 
+  async getDatabaseStats(): Promise<{
+    totalUsers: number
+    recentUsers: number
+    lastSync?: string
+  }> {
+    try {
+      const [totalUsers, recentUsers] = await Promise.all([
+        db.user.count(),
+        db.user.count({
+          where: {
+            createdAt: {
+              gte: new Date(Date.now() - 24 * 60 * 60 * 1000), // Last 24 hours
+            },
+          },
+        }),
+      ])
+
+      return {
+        totalUsers,
+        recentUsers,
+      }
+    } catch (error) {
+      logError('Failed to get database stats', error as Error)
+      return {
+        totalUsers: 0,
+        recentUsers: 0,
+      }
+    }
+  }
+
+  // Legacy method for backwards compatibility
   async getCacheStats(): Promise<{
     totalUsers: number
     cacheSize: string
     lastSync?: string
   }> {
-    try {
-      const cachedUsers = await redis.hgetall(USERS_CACHE_KEY)
-      const totalUsers = Object.keys(cachedUsers).length
-
-      // Calculate approximate cache size
-      const cacheSize = Object.values(cachedUsers).reduce(
-        (size, userData) => size + userData.length,
-        0,
-      )
-
-      return {
-        totalUsers,
-        cacheSize: this.formatBytes(cacheSize),
-      }
-    } catch (error) {
-      logError('Failed to get cache stats', error as Error)
-      return {
-        totalUsers: 0,
-        cacheSize: '0 B',
-      }
+    const stats = await this.getDatabaseStats()
+    return {
+      totalUsers: stats.totalUsers,
+      cacheSize: '0 B', // No cache size in database mode
+      lastSync: stats.lastSync,
     }
   }
 

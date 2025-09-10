@@ -3,11 +3,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { StatusCodes } from 'http-status-codes'
 import { Webhook } from 'svix'
 
-import { redis } from '@/lib/redis'
+import { db } from '@/lib/db'
 import { logError, logInfo } from '@/utils/logger'
-
-const USERS_CACHE_KEY = 'users:list'
-const EMAIL_INDEX_KEY = 'users:email_index'
 
 enum UserEventType {
   Created = 'user.created',
@@ -79,80 +76,84 @@ const verifyWebhook = async (req: FastifyRequest): Promise<WebhookEvent> => {
 const handleUserCreated = async (data: any, _reply: FastifyReply) => {
   try {
     if (data.id) {
-      // OTIMIZAÇÃO: Usa pipeline para operações batch
-      const pipeline = redis.pipeline()
-      pipeline.hset(USERS_CACHE_KEY, data.id, JSON.stringify(data))
-      
-      // Adiciona ao índice de emails
-      if (data.emailAddresses) {
-        for (const emailAddr of data.emailAddresses) {
-          pipeline.hset(EMAIL_INDEX_KEY, emailAddr.emailAddress.toLowerCase(), data.id)
-        }
-      }
-      
-      await pipeline.exec()
-      logInfo(`User ${data.id} added to cache with email index`)
+      // Create user in database using Prisma
+      await db.user.create({
+        data: {
+          id: data.id,
+          firstName: data.first_name || null,
+          lastName: data.last_name || null,
+          imageUrl: data.image_url || null,
+          hasImage: data.has_image || false,
+          primaryEmailId: data.primary_email_address_id || null,
+          emailAddresses: data.email_addresses || null,
+          phoneNumbers: data.phone_numbers || null,
+          externalAccounts: data.external_accounts || null,
+          publicMetadata: data.public_metadata || null,
+          privateMetadata: data.private_metadata || null,
+          unsafeMetadata: data.unsafe_metadata || null,
+          username: data.username || null,
+          passwordEnabled: data.password_enabled || false,
+          totpEnabled: data.totp_enabled || false,
+          backupCodeEnabled: data.backup_code_enabled || false,
+          twoFactorEnabled: data.two_factor_enabled || false,
+          banned: data.banned || false,
+          locked: data.locked || false,
+          lastSignInAt: data.last_sign_in_at ? new Date(data.last_sign_in_at) : null,
+          lastActiveAt: data.last_active_at ? new Date(data.last_active_at) : null,
+        },
+      })
+      logInfo(`User ${data.id} created in database`)
     }
   } catch (error) {
-    logError('Failed to add user to cache:', error)
+    logError('Failed to create user in database:', error)
   }
 }
 
 const handleUserUpdated = async (data: any, _reply: FastifyReply) => {
   try {
     if (data.id) {
-      // OTIMIZAÇÃO: Atualiza cache e índice de email
-      const pipeline = redis.pipeline()
-      pipeline.hset(USERS_CACHE_KEY, data.id, JSON.stringify(data))
-      
-      // Para updates, precisamos limpar emails antigos primeiro
-      // Busca dados antigos para remover do índice
-      const oldUserData = await redis.hget(USERS_CACHE_KEY, data.id)
-      if (oldUserData) {
-        const oldUser = JSON.parse(oldUserData)
-        if (oldUser.emailAddresses) {
-          for (const emailAddr of oldUser.emailAddresses) {
-            pipeline.hdel(EMAIL_INDEX_KEY, emailAddr.emailAddress.toLowerCase())
-          }
-        }
-      }
-      
-      // Adiciona novos emails ao índice
-      if (data.emailAddresses) {
-        for (const emailAddr of data.emailAddresses) {
-          pipeline.hset(EMAIL_INDEX_KEY, emailAddr.emailAddress.toLowerCase(), data.id)
-        }
-      }
-      
-      await pipeline.exec()
-      logInfo(`User ${data.id} updated in cache with email index`)
+      // Update user in database using Prisma
+      await db.user.update({
+        where: { id: data.id },
+        data: {
+          firstName: data.first_name || null,
+          lastName: data.last_name || null,
+          imageUrl: data.image_url || null,
+          hasImage: data.has_image || false,
+          primaryEmailId: data.primary_email_address_id || null,
+          emailAddresses: data.email_addresses || null,
+          phoneNumbers: data.phone_numbers || null,
+          externalAccounts: data.external_accounts || null,
+          publicMetadata: data.public_metadata || null,
+          privateMetadata: data.private_metadata || null,
+          unsafeMetadata: data.unsafe_metadata || null,
+          username: data.username || null,
+          passwordEnabled: data.password_enabled || false,
+          totpEnabled: data.totp_enabled || false,
+          backupCodeEnabled: data.backup_code_enabled || false,
+          twoFactorEnabled: data.two_factor_enabled || false,
+          banned: data.banned || false,
+          locked: data.locked || false,
+          lastSignInAt: data.last_sign_in_at ? new Date(data.last_sign_in_at) : null,
+          lastActiveAt: data.last_active_at ? new Date(data.last_active_at) : null,
+        },
+      })
+      logInfo(`User ${data.id} updated in database`)
     }
   } catch (error) {
-    logError('Failed to update user in cache:', error)
+    logError('Failed to update user in database:', error)
   }
 }
 
 const handleUserDeleted = async (id: string, _reply: FastifyReply) => {
   try {
-    // OTIMIZAÇÃO: Remove do cache e índice de email
-    const pipeline = redis.pipeline()
+    // Delete user from database using Prisma
+    await db.user.delete({
+      where: { id },
+    })
     
-    // Busca dados do usuário antes de deletar para remover do índice
-    const userData = await redis.hget(USERS_CACHE_KEY, id)
-    if (userData) {
-      const user = JSON.parse(userData)
-      if (user.emailAddresses) {
-        for (const emailAddr of user.emailAddresses) {
-          pipeline.hdel(EMAIL_INDEX_KEY, emailAddr.emailAddress.toLowerCase())
-        }
-      }
-    }
-    
-    pipeline.hdel(USERS_CACHE_KEY, id)
-    await pipeline.exec()
-    
-    logInfo(`User ${id} removed from cache and email index`)
+    logInfo(`User ${id} deleted from database`)
   } catch (error) {
-    logError('Failed to remove user from cache:', error)
+    logError('Failed to delete user from database:', error)
   }
 }

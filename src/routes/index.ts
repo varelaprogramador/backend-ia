@@ -3,9 +3,9 @@ import { StatusCodes } from 'http-status-codes'
 
 import { ENV } from '@/config/env'
 import { authMiddleware } from '@/middlewares/auth'
-import { getAllRedisCache, isRedisAvailable, deleteRedisKey, flushAllRedisCache, getRedisStats } from '@/lib/redis'
 import { UserSyncService } from '@/services/user-sync'
 import { sendSuccess } from '@/utils/response-formatter'
+import { db } from '@/lib/db'
 
 export default async function (app: FastifyInstance) {
   app.get('/', async (_req, reply) => {
@@ -118,9 +118,9 @@ export default async function (app: FastifyInstance) {
     })
   })
 
-  // Rota para obter todo o cache do Redis
+  // Rota para obter dados dos usuários da base de dados
   app.get(
-    '/cache',
+    '/users',
     {
       preHandler: authMiddleware(),
     },
@@ -132,25 +132,23 @@ export default async function (app: FastifyInstance) {
         if (user.publicMetadata?.role !== 'ADMIN') {
           return reply.status(403).send({
             error: 'Acesso negado',
-            message: 'Apenas administradores podem acessar o gerenciamento de cache',
+            message: 'Apenas administradores podem acessar o gerenciamento de usuários',
           })
         }
 
-        // Verifica se o Redis está disponível
-        if (!(await isRedisAvailable())) {
-          return reply.status(503).send({
-            error: 'Serviço indisponível',
-            message: 'Redis não está disponível no momento',
-          })
-        }
-
-        // Obtém todo o cache do Redis
-        const cacheData = await getAllRedisCache()
+        // Obtém todos os usuários da base de dados
+        const users = await db.user.findMany({
+          orderBy: { createdAt: 'desc' },
+          take: 100, // Limit to first 100 for performance
+        })
 
         return sendSuccess(reply, {
           status: StatusCodes.OK,
-          message: 'Cache do Redis obtido com sucesso',
-          data: cacheData,
+          message: 'Usuários obtidos com sucesso',
+          data: {
+            users,
+            total: users.length,
+          },
         })
       } catch (error) {
         return reply.status(500).send({
@@ -161,9 +159,9 @@ export default async function (app: FastifyInstance) {
     }
   )
 
-  // Rota para obter estatísticas do Redis
+  // Rota para obter estatísticas da base de dados
   app.get(
-    '/cache/stats',
+    '/users/stats',
     {
       preHandler: authMiddleware(),
     },
@@ -175,25 +173,30 @@ export default async function (app: FastifyInstance) {
         if (user.publicMetadata?.role !== 'ADMIN') {
           return reply.status(403).send({
             error: 'Acesso negado',
-            message: 'Apenas administradores podem acessar o gerenciamento de cache',
+            message: 'Apenas administradores podem acessar as estatísticas',
           })
         }
 
-        // Verifica se o Redis está disponível
-        if (!(await isRedisAvailable())) {
-          return reply.status(503).send({
-            error: 'Serviço indisponível',
-            message: 'Redis não está disponível no momento',
-          })
-        }
-
-        // Obtém estatísticas do Redis
-        const stats = await getRedisStats()
+        // Obtém estatísticas da base de dados
+        const [totalUsers, recentUsers] = await Promise.all([
+          db.user.count(),
+          db.user.count({
+            where: {
+              createdAt: {
+                gte: new Date(Date.now() - 24 * 60 * 60 * 1000), // Last 24 hours
+              },
+            },
+          }),
+        ])
 
         return sendSuccess(reply, {
           status: StatusCodes.OK,
-          message: 'Estatísticas do Redis obtidas com sucesso',
-          data: stats,
+          message: 'Estatísticas obtidas com sucesso',
+          data: {
+            totalUsers,
+            recentUsers,
+            timestamp: new Date().toISOString(),
+          },
         })
       } catch (error) {
         return reply.status(500).send({
@@ -204,47 +207,46 @@ export default async function (app: FastifyInstance) {
     }
   )
 
-  // Rota para deletar uma chave específica do cache
+  // Rota para deletar um usuário específico
   app.delete(
-    '/cache/:key',
+    '/users/:id',
     {
       preHandler: authMiddleware(),
     },
     async (req, reply) => {
       try {
         const user = req.user!
-        const { key } = req.params as { key: string }
+        const { id } = req.params as { id: string }
 
         // Verifica se é admin
         if (user.publicMetadata?.role !== 'ADMIN') {
           return reply.status(403).send({
             error: 'Acesso negado',
-            message: 'Apenas administradores podem gerenciar o cache',
+            message: 'Apenas administradores podem gerenciar usuários',
           })
         }
 
-        // Verifica se o Redis está disponível
-        if (!(await isRedisAvailable())) {
-          return reply.status(503).send({
-            error: 'Serviço indisponível',
-            message: 'Redis não está disponível no momento',
-          })
-        }
+        // Verifica se o usuário existe
+        const existingUser = await db.user.findUnique({
+          where: { id },
+        })
 
-        // Deleta a chave
-        const deleted = await deleteRedisKey(key)
-
-        if (!deleted) {
+        if (!existingUser) {
           return reply.status(404).send({
-            error: 'Chave não encontrada',
-            message: `A chave '${key}' não foi encontrada no cache`,
+            error: 'Usuário não encontrado',
+            message: `O usuário '${id}' não foi encontrado`,
           })
         }
 
+        // Deleta o usuário
+        await db.user.delete({
+          where: { id },
+        })
+
         return sendSuccess(reply, {
           status: StatusCodes.OK,
-          message: `Chave '${key}' deletada com sucesso`,
-          data: { key, deleted: true },
+          message: `Usuário '${id}' deletado com sucesso`,
+          data: { id, deleted: true },
         })
       } catch (error) {
         return reply.status(500).send({
@@ -255,9 +257,9 @@ export default async function (app: FastifyInstance) {
     }
   )
 
-  // Rota para limpar todo o cache
+  // Rota para limpar todos os usuários (CUIDADO: Operação perigosa)
   app.delete(
-    '/cache',
+    '/users',
     {
       preHandler: authMiddleware(),
     },
@@ -269,25 +271,29 @@ export default async function (app: FastifyInstance) {
         if (user.publicMetadata?.role !== 'ADMIN') {
           return reply.status(403).send({
             error: 'Acesso negado',
-            message: 'Apenas administradores podem gerenciar o cache',
+            message: 'Apenas administradores podem realizar esta operação',
           })
         }
 
-        // Verifica se o Redis está disponível
-        if (!(await isRedisAvailable())) {
-          return reply.status(503).send({
-            error: 'Serviço indisponível',
-            message: 'Redis não está disponível no momento',
+        // Verifica confirmação adicional para operação perigosa
+        const { confirm } = req.query as { confirm?: string }
+        if (confirm !== 'DELETE_ALL_USERS') {
+          return reply.status(400).send({
+            error: 'Confirmação necessária',
+            message: 'Para deletar todos os usuários, inclua ?confirm=DELETE_ALL_USERS',
           })
         }
 
-        // Limpa todo o cache
-        await flushAllRedisCache()
+        // Conta quantos usuários serão deletados
+        const userCount = await db.user.count()
+
+        // Deleta todos os usuários
+        await db.user.deleteMany({})
 
         return sendSuccess(reply, {
           status: StatusCodes.OK,
-          message: 'Todo o cache foi limpo com sucesso',
-          data: { flushed: true },
+          message: `${userCount} usuários foram deletados com sucesso`,
+          data: { deleted: userCount },
         })
       } catch (error) {
         return reply.status(500).send({
@@ -298,9 +304,9 @@ export default async function (app: FastifyInstance) {
     }
   )
 
-  // Rota para forçar sincronização do cache de usuários
+  // Rota para forçar sincronização dos usuários com Clerk
   app.post(
-    '/cache/users/sync',
+    '/users/sync',
     {
       preHandler: authMiddleware(),
     },
@@ -312,26 +318,18 @@ export default async function (app: FastifyInstance) {
         if (user.publicMetadata?.role !== 'ADMIN') {
           return reply.status(403).send({
             error: 'Acesso negado',
-            message: 'Apenas administradores podem sincronizar o cache de usuários',
-          })
-        }
-
-        // Verifica se o Redis está disponível
-        if (!(await isRedisAvailable())) {
-          return reply.status(503).send({
-            error: 'Serviço indisponível',
-            message: 'Redis não está disponível no momento',
+            message: 'Apenas administradores podem sincronizar os usuários',
           })
         }
 
         // Força sincronização dos usuários
         const userSyncService = UserSyncService.getInstance()
-        await userSyncService.syncUsersWithCache()
+        const result = await userSyncService.syncUsersWithDatabase()
 
         return sendSuccess(reply, {
           status: StatusCodes.OK,
-          message: 'Cache de usuários sincronizado com sucesso',
-          data: { synced: true },
+          message: 'Sincronização de usuários concluída com sucesso',
+          data: result,
         })
       } catch (error) {
         return reply.status(500).send({

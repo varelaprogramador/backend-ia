@@ -1,44 +1,60 @@
 import { clerkClient, type User } from '@clerk/fastify'
 
-import { redis } from '@/lib/redis'
+import { db } from '@/lib/db'
 
-const USERS_CACHE_KEY = 'users:list'
-const EMAIL_INDEX_KEY = 'users:email_index' // New: email -> userId mapping
 const BATCH_SIZE = 50 // Chunk size for batch operations
 
 /**
- * Busca um usuário no Clerk
+ * Busca um usuário na base de dados local ou no Clerk
  * @param userId - O ID do usuário
  * @returns O usuário ou null se não encontrado
  */
 export const getUser = async (userId: string): Promise<User | null> => {
   try {
-    // Primeiro tenta buscar no cache
-    const cachedUser = await redis.hget(USERS_CACHE_KEY, userId)
-    if (cachedUser) {
-      return JSON.parse(cachedUser) as User
+    // Primeiro tenta buscar na base de dados local
+    const dbUser = await db.user.findUnique({
+      where: { id: userId },
+    })
+
+    if (dbUser) {
+      // Converte o usuário da base de dados para o formato Clerk
+      return {
+        id: dbUser.id,
+        firstName: dbUser.firstName,
+        lastName: dbUser.lastName,
+        imageUrl: dbUser.imageUrl,
+        hasImage: dbUser.hasImage,
+        primaryEmailAddressId: dbUser.primaryEmailId,
+        emailAddresses: dbUser.emailAddresses as any,
+        phoneNumbers: dbUser.phoneNumbers as any,
+        externalAccounts: dbUser.externalAccounts as any,
+        publicMetadata: dbUser.publicMetadata as any,
+        privateMetadata: dbUser.privateMetadata as any,
+        unsafeMetadata: dbUser.unsafeMetadata as any,
+        username: dbUser.username,
+        passwordEnabled: dbUser.passwordEnabled,
+        totpEnabled: dbUser.totpEnabled,
+        backupCodeEnabled: dbUser.backupCodeEnabled,
+        twoFactorEnabled: dbUser.twoFactorEnabled,
+        banned: dbUser.banned,
+        locked: dbUser.locked,
+        createdAt: dbUser.createdAt.getTime(),
+        updatedAt: dbUser.updatedAt.getTime(),
+        lastSignInAt: dbUser.lastSignInAt?.getTime() || null,
+        lastActiveAt: dbUser.lastActiveAt?.getTime() || null,
+      } as User
     }
 
-    // Se não encontrar no cache, busca no Clerk
+    // Se não encontrar na base local, busca no Clerk
     const user = await clerkClient.users.getUser(userId)
-
-    if (!user) {
-      return null
-    }
-
-    // Atualiza o cache com o usuário encontrado
-    await redis.hset(USERS_CACHE_KEY, userId, JSON.stringify(user))
-
-    return {
-      ...user,
-    } as User
+    return user || null
   } catch (error) {
     return null
   }
 }
 
 /**
- * Busca um usuário no Clerk pelo email
+ * Busca um usuário na base de dados local ou no Clerk pelo email
  * @param email - O email do usuário
  * @returns O usuário ou null se não encontrado
  */
@@ -46,44 +62,59 @@ export const getUserByEmail = async (email: string): Promise<User | null> => {
   try {
     const normalizedEmail = email?.toLowerCase()?.trim()
 
-    // OTIMIZAÇÃO: Busca rápida no índice de emails O(1)
-    const userId = await redis.hget(EMAIL_INDEX_KEY, normalizedEmail)
-    if (userId) {
-      const cachedUser = await redis.hget(USERS_CACHE_KEY, userId)
-      if (cachedUser) {
-        return JSON.parse(cachedUser) as User
-      }
+    // Busca na base de dados local usando JSON path para emailAddresses
+    const dbUser = await db.user.findFirst({
+      where: {
+        emailAddresses: {
+          path: '$[*].emailAddress',
+          array_contains: normalizedEmail,
+        },
+      },
+    })
+
+    if (dbUser) {
+      // Converte o usuário da base de dados para o formato Clerk
+      return {
+        id: dbUser.id,
+        firstName: dbUser.firstName,
+        lastName: dbUser.lastName,
+        imageUrl: dbUser.imageUrl,
+        hasImage: dbUser.hasImage,
+        primaryEmailAddressId: dbUser.primaryEmailId,
+        emailAddresses: dbUser.emailAddresses as any,
+        phoneNumbers: dbUser.phoneNumbers as any,
+        externalAccounts: dbUser.externalAccounts as any,
+        publicMetadata: dbUser.publicMetadata as any,
+        privateMetadata: dbUser.privateMetadata as any,
+        unsafeMetadata: dbUser.unsafeMetadata as any,
+        username: dbUser.username,
+        passwordEnabled: dbUser.passwordEnabled,
+        totpEnabled: dbUser.totpEnabled,
+        backupCodeEnabled: dbUser.backupCodeEnabled,
+        twoFactorEnabled: dbUser.twoFactorEnabled,
+        banned: dbUser.banned,
+        locked: dbUser.locked,
+        createdAt: dbUser.createdAt.getTime(),
+        updatedAt: dbUser.updatedAt.getTime(),
+        lastSignInAt: dbUser.lastSignInAt?.getTime() || null,
+        lastActiveAt: dbUser.lastActiveAt?.getTime() || null,
+      } as User
     }
 
-    // Se não encontrar no cache, busca no Clerk
+    // Se não encontrar na base local, busca no Clerk
     const userList = await clerkClient.users.getUserList({
       emailAddress: [normalizedEmail],
       limit: 1,
     })
 
-    const user = userList.data[0]
-    if (user) {
-      // Atualiza cache e índice usando pipeline
-      const pipeline = redis.pipeline()
-      pipeline.hset(USERS_CACHE_KEY, user.id, JSON.stringify(user))
-      
-      // Atualiza índice de emails
-      for (const emailAddr of user.emailAddresses || []) {
-        pipeline.hset(EMAIL_INDEX_KEY, emailAddr.emailAddress.toLowerCase(), user.id)
-      }
-      
-      await pipeline.exec()
-      return user
-    }
-
-    return null
+    return userList.data[0] || null
   } catch (error) {
     return null
   }
 }
 
 /**
- * Cria um usuário no Clerk
+ * Cria um usuário no Clerk e sincroniza com a base de dados local
  * @param user - O usuário a ser criado
  * @returns O usuário criado
  */
@@ -108,20 +139,36 @@ export const createUser = async (user: {
     ...(user.password && { password: user.password }),
   })
 
-  // Adiciona o novo usuário ao cache e índice usando pipeline
+  // Adiciona o novo usuário à base de dados local
   if (createdUser && createdUser.id) {
     try {
-      const pipeline = redis.pipeline()
-      pipeline.hset(USERS_CACHE_KEY, createdUser.id, JSON.stringify(createdUser))
-      
-      // Adiciona ao índice de emails
-      for (const emailAddr of createdUser.emailAddresses || []) {
-        pipeline.hset(EMAIL_INDEX_KEY, emailAddr.emailAddress.toLowerCase(), createdUser.id)
-      }
-      
-      await pipeline.exec()
+      await db.user.create({
+        data: {
+          id: createdUser.id,
+          firstName: createdUser.firstName,
+          lastName: createdUser.lastName,
+          imageUrl: createdUser.imageUrl,
+          hasImage: createdUser.hasImage,
+          primaryEmailId: createdUser.primaryEmailAddressId,
+          emailAddresses: createdUser.emailAddresses,
+          phoneNumbers: createdUser.phoneNumbers,
+          externalAccounts: createdUser.externalAccounts,
+          publicMetadata: createdUser.publicMetadata,
+          privateMetadata: createdUser.privateMetadata,
+          unsafeMetadata: createdUser.unsafeMetadata,
+          username: createdUser.username,
+          passwordEnabled: createdUser.passwordEnabled,
+          totpEnabled: createdUser.totpEnabled,
+          backupCodeEnabled: createdUser.backupCodeEnabled,
+          twoFactorEnabled: createdUser.twoFactorEnabled,
+          banned: createdUser.banned,
+          locked: createdUser.locked,
+          lastSignInAt: createdUser.lastSignInAt ? new Date(createdUser.lastSignInAt) : null,
+          lastActiveAt: createdUser.lastActiveAt ? new Date(createdUser.lastActiveAt) : null,
+        },
+      })
     } catch (error) {
-      console.error('Failed to cache created user:', error)
+      console.error('Failed to save created user to database:', error)
     }
   }
 
@@ -129,58 +176,44 @@ export const createUser = async (user: {
 }
 
 /**
- * Lista todos os usuários
+ * Lista todos os usuários da base de dados local
  * @returns Array com todos os usuários
  */
 export const getAllUsers = async (): Promise<User[]> => {
   try {
-    // Primeiro tenta buscar todos os usuários do cache
-    const cachedUsers = await redis.hgetall(USERS_CACHE_KEY)
+    // Busca todos os usuários da base de dados local
+    const dbUsers = await db.user.findMany({
+      orderBy: { createdAt: 'desc' },
+    })
 
-    // Se o cache tem usuários, retorna eles
-    if (cachedUsers && Object.keys(cachedUsers).length > 0) {
-      return Object.values(cachedUsers).map(
-        userJson => JSON.parse(userJson) as User,
-      )
-    }
-
-    // Se o cache está vazio, busca todos os usuários do Clerk
-    const users: User[] = []
-    let hasMore = true
-    let offset = 0
-    const limit = 100
-
-    while (hasMore) {
-      const userList = await clerkClient.users.getUserList({
-        limit,
-        offset,
-      })
-
-      users.push(...userList.data)
-
-      // OTIMIZAÇÃO: Adiciona usuários em batch usando pipeline
-      if (userList.data.length > 0) {
-        const pipeline = redis.pipeline()
-        
-        for (const user of userList.data) {
-          pipeline.hset(USERS_CACHE_KEY, user.id, JSON.stringify(user))
-          
-          // Adiciona ao índice de emails
-          for (const emailAddr of user.emailAddresses || []) {
-            pipeline.hset(EMAIL_INDEX_KEY, emailAddr.emailAddress.toLowerCase(), user.id)
-          }
-        }
-        
-        await pipeline.exec()
-      }
-
-      hasMore = userList.totalCount > offset + limit
-      offset += limit
-    }
-
-    return users
+    // Converte os usuários da base de dados para o formato Clerk
+    return dbUsers.map(dbUser => ({
+      id: dbUser.id,
+      firstName: dbUser.firstName,
+      lastName: dbUser.lastName,
+      imageUrl: dbUser.imageUrl,
+      hasImage: dbUser.hasImage,
+      primaryEmailAddressId: dbUser.primaryEmailId,
+      emailAddresses: dbUser.emailAddresses as any,
+      phoneNumbers: dbUser.phoneNumbers as any,
+      externalAccounts: dbUser.externalAccounts as any,
+      publicMetadata: dbUser.publicMetadata as any,
+      privateMetadata: dbUser.privateMetadata as any,
+      unsafeMetadata: dbUser.unsafeMetadata as any,
+      username: dbUser.username,
+      passwordEnabled: dbUser.passwordEnabled,
+      totpEnabled: dbUser.totpEnabled,
+      backupCodeEnabled: dbUser.backupCodeEnabled,
+      twoFactorEnabled: dbUser.twoFactorEnabled,
+      banned: dbUser.banned,
+      locked: dbUser.locked,
+      createdAt: dbUser.createdAt.getTime(),
+      updatedAt: dbUser.updatedAt.getTime(),
+      lastSignInAt: dbUser.lastSignInAt?.getTime() || null,
+      lastActiveAt: dbUser.lastActiveAt?.getTime() || null,
+    } as User))
   } catch (error) {
-    console.error('Failed to get all users:', error)
+    console.error('Failed to get all users from database:', error)
     return []
   }
 }
@@ -196,52 +229,60 @@ export const getUsersByIds = async (userIds: string[]): Promise<User[]> => {
       return []
     }
 
-    const users: User[] = []
-    const missingIds: string[] = []
+    // Busca os usuários na base de dados local
+    const dbUsers = await db.user.findMany({
+      where: {
+        id: {
+          in: userIds,
+        },
+      },
+    })
 
-    // OTIMIZAÇÃO: Usa HMGET para buscar apenas os IDs solicitados
-    const cachedUserData = await redis.hmget(USERS_CACHE_KEY, ...userIds)
+    // Converte os usuários da base de dados para o formato Clerk
+    const users = dbUsers.map(dbUser => ({
+      id: dbUser.id,
+      firstName: dbUser.firstName,
+      lastName: dbUser.lastName,
+      imageUrl: dbUser.imageUrl,
+      hasImage: dbUser.hasImage,
+      primaryEmailAddressId: dbUser.primaryEmailId,
+      emailAddresses: dbUser.emailAddresses as any,
+      phoneNumbers: dbUser.phoneNumbers as any,
+      externalAccounts: dbUser.externalAccounts as any,
+      publicMetadata: dbUser.publicMetadata as any,
+      privateMetadata: dbUser.privateMetadata as any,
+      unsafeMetadata: dbUser.unsafeMetadata as any,
+      username: dbUser.username,
+      passwordEnabled: dbUser.passwordEnabled,
+      totpEnabled: dbUser.totpEnabled,
+      backupCodeEnabled: dbUser.backupCodeEnabled,
+      twoFactorEnabled: dbUser.twoFactorEnabled,
+      banned: dbUser.banned,
+      locked: dbUser.locked,
+      createdAt: dbUser.createdAt.getTime(),
+      updatedAt: dbUser.updatedAt.getTime(),
+      lastSignInAt: dbUser.lastSignInAt?.getTime() || null,
+      lastActiveAt: dbUser.lastActiveAt?.getTime() || null,
+    } as User))
 
-    for (let i = 0; i < userIds.length; i++) {
-      const userData = cachedUserData[i]
-      if (userData) {
-        users.push(JSON.parse(userData) as User)
-      } else {
-        missingIds.push(userIds[i])
-      }
-    }
+    // Se algum ID não foi encontrado na base local, busca no Clerk
+    const foundIds = users.map(u => u.id)
+    const missingIds = userIds.filter(id => !foundIds.includes(id))
 
-    // Se houver IDs faltando, busca no Clerk
     if (missingIds.length > 0) {
-      // OTIMIZAÇÃO: Processa em chunks para evitar timeout
+      // Processa em chunks para evitar timeout
       const chunks = []
       for (let i = 0; i < missingIds.length; i += BATCH_SIZE) {
         chunks.push(missingIds.slice(i, i + BATCH_SIZE))
       }
 
-      const pipeline = redis.pipeline()
-      
       for (const chunk of chunks) {
         const userList = await clerkClient.users.getUserList({
           userId: chunk,
           limit: chunk.length,
         })
 
-        for (const user of userList.data) {
-          users.push(user)
-          
-          // Adiciona ao cache usando pipeline
-          pipeline.hset(USERS_CACHE_KEY, user.id, JSON.stringify(user))
-          
-          // Adiciona ao índice de emails
-          for (const emailAddr of user.emailAddresses || []) {
-            pipeline.hset(EMAIL_INDEX_KEY, emailAddr.emailAddress.toLowerCase(), user.id)
-          }
-        }
-      }
-      
-      if (pipeline.length > 0) {
-        await pipeline.exec()
+        users.push(...userList.data)
       }
     }
 
@@ -310,27 +351,36 @@ export const findOrUpdateUserByEmail = async (userData: {
       ...(userData.password && { password: userData.password }),
     })
 
-    // Atualiza cache e índice usando pipeline
+    // Atualiza o usuário na base de dados local
     if (updatedUser && updatedUser.id) {
       try {
-        const pipeline = redis.pipeline()
-        pipeline.hset(USERS_CACHE_KEY, updatedUser.id, JSON.stringify(updatedUser))
-        
-        // Remove emails antigos do índice
-        if (existingUser.emailAddresses) {
-          for (const emailAddr of existingUser.emailAddresses) {
-            pipeline.hdel(EMAIL_INDEX_KEY, emailAddr.emailAddress.toLowerCase())
-          }
-        }
-        
-        // Adiciona novos emails ao índice
-        for (const emailAddr of updatedUser.emailAddresses || []) {
-          pipeline.hset(EMAIL_INDEX_KEY, emailAddr.emailAddress.toLowerCase(), updatedUser.id)
-        }
-        
-        await pipeline.exec()
+        await db.user.update({
+          where: { id: updatedUser.id },
+          data: {
+            firstName: updatedUser.firstName,
+            lastName: updatedUser.lastName,
+            imageUrl: updatedUser.imageUrl,
+            hasImage: updatedUser.hasImage,
+            primaryEmailId: updatedUser.primaryEmailAddressId,
+            emailAddresses: updatedUser.emailAddresses,
+            phoneNumbers: updatedUser.phoneNumbers,
+            externalAccounts: updatedUser.externalAccounts,
+            publicMetadata: updatedUser.publicMetadata,
+            privateMetadata: updatedUser.privateMetadata,
+            unsafeMetadata: updatedUser.unsafeMetadata,
+            username: updatedUser.username,
+            passwordEnabled: updatedUser.passwordEnabled,
+            totpEnabled: updatedUser.totpEnabled,
+            backupCodeEnabled: updatedUser.backupCodeEnabled,
+            twoFactorEnabled: updatedUser.twoFactorEnabled,
+            banned: updatedUser.banned,
+            locked: updatedUser.locked,
+            lastSignInAt: updatedUser.lastSignInAt ? new Date(updatedUser.lastSignInAt) : null,
+            lastActiveAt: updatedUser.lastActiveAt ? new Date(updatedUser.lastActiveAt) : null,
+          },
+        })
       } catch (error) {
-        console.error('Failed to cache updated user:', error)
+        console.error('Failed to update user in database:', error)
       }
     }
 

@@ -16,3 +16,62 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
+
+model User {
+  id                String   @id
+  firstName         String?
+  lastName          String?
+  imageUrl          String?
+  hasImage          Boolean  @default(false)
+  primaryEmailId    String?
+  emailAddresses    Json?
+  phoneNumbers      Json?
+  externalAccounts  Json?
+  publicMetadata    Json?
+  privateMetadata   Json?
+  unsafeMetadata    Json?
+  username          String?
+  passwordEnabled   Boolean  @default(false)
+  totpEnabled       Boolean  @default(false)
+  backupCodeEnabled Boolean  @default(false)
+  twoFactorEnabled  Boolean  @default(false)
+  banned            Boolean  @default(false)
+  locked            Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  lastSignInAt      DateTime?
+  lastActiveAt      DateTime?
+
+  @@map("users")
+}
+
+model EvolutionMessage {
+  id           String   @id @default(cuid())
+  messageId    String   @unique
+  instanceName String
+  chatId       String
+  senderId     String
+  senderName   String?
+  messageType  String
+  content      String?
+  mediaUrl     String?
+  mediaType    String?
+  caption      String?
+  fileName     String?
+  timestamp    DateTime
+  isGroup      Boolean  @default(false)
+  status       String?
+  serverUrl    String?
+  apikey       String?
+  webhookData  Json?
+  processed    Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([chatId, timestamp])
+  @@index([senderId, timestamp])
+  @@index([messageType])
+  @@index([processed])
+  @@index([instanceName])
+  @@map("evolution_messages")
+}
