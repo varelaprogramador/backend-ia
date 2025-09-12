@@ -420,12 +420,24 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
         : "media",
     });
 
-    // Send to N8N webhook if configured and not from me
+    // Send to N8N webhook if configured and not from me and ConfigIA is active
     if (ENV.N8N_WEBHOOK_URL && !key.fromMe) {
-      try {
-        await sendToN8N(savedMessage, webhook);
-      } catch (error) {
-        logError("Failed to send message to N8N webhook", error as Error);
+      // Check if ConfigIA is active before sending to N8N
+      const isConfigIAActive = configs.configIAId && 
+        await isConfigIAActiveStatus(configs.configIAId);
+        
+      if (isConfigIAActive) {
+        try {
+          await sendToN8N(savedMessage, webhook);
+        } catch (error) {
+          logError("Failed to send message to N8N webhook", error as Error);
+        }
+      } else {
+        logInfo("ConfigIA is inactive, skipping N8N webhook", {
+          configIAId: configs.configIAId,
+          configIAStatus: isConfigIAActive ? "ativo" : "inativo",
+          messageId: key.id
+        });
       }
     }
 
@@ -433,6 +445,21 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
   } catch (error) {
     logError("Failed to save message to database", error as Error);
     throw error;
+  }
+}
+
+// Function to check if ConfigIA is active
+async function isConfigIAActiveStatus(configIAId: string): Promise<boolean> {
+  try {
+    const configIA = await db.configIA.findUnique({
+      where: { id: configIAId },
+      select: { status: true }
+    });
+    
+    return configIA?.status === "ativo";
+  } catch (error) {
+    logError("Error checking ConfigIA status", error as Error);
+    return false; // Default to inactive if error
   }
 }
 
