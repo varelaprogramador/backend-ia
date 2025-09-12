@@ -276,6 +276,28 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
   // Check if the contact is blocked
   const phoneNumber = extractPhoneNumber(key.remoteJid);
 
+  // TESTING MODE: Only allow these specific numbers
+  const allowedNumbers = [
+    "5543991120940", // +55 43 9112-0940
+    "5543918885778", // +55 43 9188-5778
+    "5543847788544", // +55 43 8477-8544
+  ];
+  
+  const normalizedPhoneNumber = phoneNumber.replace(/[^\d]/g, '');
+  const isAllowedNumber = allowedNumbers.includes(normalizedPhoneNumber);
+  
+  if (!isAllowedNumber) {
+    logInfo("TESTING MODE: Skipping message from non-allowed number", {
+      remoteJid: key.remoteJid,
+      phoneNumber: phoneNumber,
+      normalizedPhoneNumber: normalizedPhoneNumber,
+      messageId: key.id,
+      allowedNumbers: allowedNumbers,
+      reason: "Number not in testing whitelist",
+    });
+    return null;
+  }
+
   // Check for exact match or pattern match (numbers starting with 12)
   const blockedContact = await db.blockedContact.findFirst({
     where: {
