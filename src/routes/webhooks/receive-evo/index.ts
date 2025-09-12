@@ -2,6 +2,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { StatusCodes } from "http-status-codes";
 import { logError, logInfo } from "@/utils/logger";
 import { db } from "@/lib/db";
+import { ENV } from "@/config/env";
+import axios from "axios";
 
 // Types for Evolution API webhook
 interface EvolutionWebhookKey {
@@ -19,12 +21,14 @@ interface EvolutionMessage {
     mimetype?: string;
     caption?: string;
     fileLength?: number;
+    jpegThumbnail?: string; // Base64 thumbnail
   };
   videoMessage?: {
     url?: string;
     mimetype?: string;
     caption?: string;
     fileLength?: number;
+    jpegThumbnail?: string; // Base64 thumbnail for videos
   };
   documentMessage?: {
     url?: string;
@@ -62,6 +66,25 @@ interface EvolutionWebhookBody {
   sender: string;
   server_url: string;
   apikey: string;
+
+  // AI Chat Memory fields (optional)
+  action?: string;
+  input?: string;
+  system_message?: string;
+  sessionId?: string;
+  id?: string;
+  direction?: string;
+
+  // Instance identification configs
+  configs?: {
+    evolutionInstance: string;
+    serverUrl: string;
+    apikey: string;
+    instanceId?: string;
+    configIAId?: string;
+    userId?: string;
+    aiPrompt?: string;
+  };
 }
 
 interface WebhookRequest extends FastifyRequest {
@@ -92,7 +115,7 @@ export default async function (app: FastifyInstance) {
             const result = await processWebhook(webhook);
             results.push({
               success: true,
-              messageId: result?.id,
+              messageId: result?.sessionId,
               event: webhook.event,
             });
           } catch (error) {
@@ -131,15 +154,111 @@ export default async function (app: FastifyInstance) {
       timestamp: new Date().toISOString(),
     });
   });
+
+  // Endpoint to receive AI responses
+  app.post<{
+    Body: { sessionId: string; aiResponse: string; chatId?: string };
+  }>("/ai-response", async (req, reply) => {
+    try {
+      const { sessionId, aiResponse, chatId } = req.body;
+
+      if (!sessionId || !aiResponse) {
+        return reply.code(StatusCodes.BAD_REQUEST).send({
+          status: "error",
+          message: "sessionId and aiResponse are required",
+        });
+      }
+
+      const aiMessage = await db.myMessages.create({
+        data: {
+          sessionId: sessionId,
+          message: aiResponse,
+          direction: "received",
+          aiResponse: aiResponse,
+          isAiResponse: true,
+          chatId: chatId || null,
+          createdAt: new Date(),
+        },
+      });
+
+      logInfo("AI response saved to MyMessages table", {
+        sessionId,
+        aiResponse: aiResponse.substring(0, 100),
+        chatId,
+      });
+
+      return reply.code(StatusCodes.OK).send({
+        status: "success",
+        message: "AI response saved",
+        id: aiMessage.id,
+      });
+    } catch (error) {
+      logError("Error saving AI response", error as Error);
+      return reply.code(StatusCodes.INTERNAL_SERVER_ERROR).send({
+        status: "error",
+        message: "Failed to save AI response",
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  });
+
+  // Endpoint to get your messages (conversation history)
+  app.get<{
+    Querystring: { sessionId?: string; chatId?: string; limit?: string };
+  }>("/my-messages", async (req, reply) => {
+    try {
+      const { sessionId, chatId, limit = "50" } = req.query;
+
+      const where: any = {};
+      if (sessionId) where.sessionId = sessionId;
+      if (chatId) where.chatId = chatId;
+
+      const messages = await db.myMessages.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        take: parseInt(limit),
+        select: {
+          id: true,
+          sessionId: true,
+          message: true,
+          direction: true,
+          createdAt: true,
+          chatId: true,
+          messageType: true,
+          isAiResponse: true,
+          aiResponse: true,
+          mediaType: true,
+          fileName: true,
+        },
+      });
+
+      return reply.code(StatusCodes.OK).send({
+        status: "success",
+        count: messages.length,
+        messages: messages.reverse(), // Show oldest first
+      });
+    } catch (error) {
+      logError("Error retrieving my messages", error as Error);
+      return reply.code(StatusCodes.INTERNAL_SERVER_ERROR).send({
+        status: "error",
+        message: "Failed to retrieve messages",
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  });
 }
 
 async function processWebhook(webhook: EvolutionWebhookBody) {
   const { event, instance, data, date_time, sender, server_url, apikey } =
     webhook;
 
+  // Create configs object to identify webhook source
+  const configs = await createConfigsObject(instance, server_url, apikey);
+  webhook.configs = configs;
+
   // Only process messages.upsert events
   if (event !== "messages.upsert") {
-    logInfo("Ignoring non-message event", { event });
+    logInfo("Ignoring non-message event", { event, configs });
     return null;
   }
 
@@ -154,34 +273,135 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
   const senderId = isGroup ? key.participant : key.remoteJid;
   const senderName = pushName || extractPhoneNumber(senderId || "");
 
-  // Skip messages sent by the bot itself
-  if (key.fromMe) {
-    logInfo("Skipping message sent by bot", { messageId: key.id });
+  // Check if the contact is blocked
+  const phoneNumber = extractPhoneNumber(key.remoteJid);
+
+  // Check for exact match or pattern match (numbers starting with 12)
+  const blockedContact = await db.blockedContact.findFirst({
+    where: {
+      OR: [{ remoteJid: key.remoteJid }],
+    },
+  });
+
+  // Also check if phone number starts with 12
+  const isBlockedPattern = key.remoteJid.startsWith("12");
+
+  if (blockedContact || isBlockedPattern) {
+    logInfo("Skipping message from blocked contact", {
+      remoteJid: key.remoteJid,
+      phoneNumber: phoneNumber,
+      messageId: key.id,
+      reason:
+        blockedContact?.reason || "Number starts with 12 (blocked pattern)",
+      patternMatch: isBlockedPattern,
+    });
     return null;
   }
 
   try {
-    // Save message to database
-    const savedMessage = await db.evolutionMessage.create({
-      data: {
+    // Get media as base64 if it's a media message
+    let mediaBase64: string | null = null;
+    const hasMedia = [
+      "imageMessage",
+      "videoMessage",
+      "documentMessage",
+      "audioMessage",
+      "stickerMessage",
+    ].includes(messageType);
+
+    if (hasMedia) {
+      mediaBase64 = await getMediaBase64(message, messageType);
+    }
+
+    // Generate sessionId if not provided
+    const sessionId =
+      webhook.sessionId ||
+      `${chatId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    // Check if this message is from you (my phone number)
+    const isMyMessage =
+      ENV.MY_PHONE_NUMBER && phoneNumber === ENV.MY_PHONE_NUMBER;
+
+    if (isMyMessage) {
+      // Save your message to MyMessages table
+      const myMessage = await db.myMessages.create({
+        data: {
+          sessionId: sessionId,
+          message: messageContent.text || "Mensagem sem texto",
+          direction: "sent",
+
+          // Evolution API fields
+          messageId: key?.id || null,
+          instanceName: instance || null,
+          chatId: chatId || null,
+          senderId: senderId || null,
+          senderName: senderName || null,
+          messageType: messageType || null,
+          content: messageContent.text || undefined,
+          mediaUrl: messageContent.mediaUrl || undefined,
+          mediaType: messageContent.mediaType || undefined,
+          mediaBase64: mediaBase64 || undefined,
+          caption: messageContent.caption || undefined,
+          fileName: messageContent.fileName || undefined,
+          timestamp: messageTimestamp
+            ? new Date(messageTimestamp * 1000)
+            : undefined,
+          isGroup: isGroup !== undefined ? isGroup : undefined,
+          status: data?.status || undefined,
+          serverUrl: server_url || undefined,
+          apikey: apikey || undefined,
+          webhookData: webhook
+            ? JSON.parse(JSON.stringify(webhook))
+            : undefined,
+          createdAt: date_time ? new Date(date_time) : undefined,
+          isAiResponse: false,
+        },
+      });
+
+      logInfo("Your message saved to MyMessages table", {
         messageId: key.id,
-        instanceName: instance,
-        chatId,
-        senderId: senderId || "",
-        senderName,
         messageType,
-        content: messageContent.text,
-        mediaUrl: messageContent.mediaUrl,
-        mediaType: messageContent.mediaType,
-        caption: messageContent.caption,
-        fileName: messageContent.fileName,
-        timestamp: new Date(messageTimestamp * 1000),
-        isGroup,
-        status: data.status,
-        serverUrl: server_url,
-        apikey: apikey, // Be careful with storing API keys
-        webhookData: webhook as any, // Store full webhook for reference
-        createdAt: new Date(date_time),
+        phoneNumber,
+        content: messageContent.text?.substring(0, 100),
+      });
+
+      return myMessage;
+    }
+
+    // Save message to database (for other users)
+    const savedMessage = await db.n8nChatMemory.create({
+      data: {
+        sessionId: sessionId,
+        message: messageContent.text || "Mensagem sem texto",
+        direction: webhook.direction || "input",
+
+        // Evolution API fields
+        messageId: key?.id || null,
+        instanceName: instance || null,
+        chatId: chatId || null,
+        senderId: senderId || null,
+        senderName: senderName || null,
+        messageType: messageType || null,
+        content: messageContent.text || undefined,
+        mediaUrl: messageContent.mediaUrl || undefined,
+        mediaType: messageContent.mediaType || undefined,
+        mediaBase64: mediaBase64 || undefined, // Store base64 content
+        caption: messageContent.caption || undefined,
+        fileName: messageContent.fileName || undefined,
+        timestamp: messageTimestamp
+          ? new Date(messageTimestamp * 1000)
+          : undefined,
+        isGroup: isGroup !== undefined ? isGroup : undefined,
+        status: data?.status || undefined,
+        serverUrl: server_url || undefined,
+        apikey: apikey || undefined, // Cuidado ao armazenar chaves de API
+        webhookData: webhook ? JSON.parse(JSON.stringify(webhook)) : undefined, // Garante compatibilidade com InputJsonValue
+        createdAt: date_time ? new Date(date_time) : undefined,
+
+        // AI Chat Memory fields - use values from webhook if available
+        action: webhook.action || "insertSystem",
+        input: webhook.input || messageContent.text || undefined,
+        system_message: webhook.system_message || undefined,
       },
     });
 
@@ -191,21 +411,100 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
       senderId,
       chatId,
       isGroup,
+      hasBase64: !!mediaBase64,
+      base64Size: mediaBase64
+        ? `${Math.round(mediaBase64.length / 1024)}KB`
+        : null,
       content: messageContent.text
         ? messageContent.text.substring(0, 100)
         : "media",
     });
 
-    // Here you can add additional processing:
-    // - Send to AI processing queue
-    // - Trigger automated responses
-    // - Forward to other services
-    // - Apply business logic rules
+    // Send to N8N webhook if configured and not from me
+    if (ENV.N8N_WEBHOOK_URL && !key.fromMe) {
+      try {
+        await sendToN8N(savedMessage, webhook);
+      } catch (error) {
+        logError("Failed to send message to N8N webhook", error as Error);
+      }
+    }
 
     return savedMessage;
   } catch (error) {
     logError("Failed to save message to database", error as Error);
     throw error;
+  }
+}
+
+// Function to create configs object for webhook identification
+async function createConfigsObject(
+  instanceName: string,
+  serverUrl: string,
+  apikey: string
+): Promise<{
+  evolutionInstance: string;
+  serverUrl: string;
+  apikey: string;
+  instanceId?: string;
+  configIAId?: string;
+  userId?: string;
+  aiPrompt?: string;
+}> {
+  try {
+    logInfo("Creating configs object for webhook identification", {
+      instanceName,
+      serverUrl: serverUrl?.substring(0, 50) + "...",
+    });
+
+    // Look up evolution instance in database
+    const evolutionInstance = await db.evolutionInstance.findFirst({
+      where: {
+        instanceName: instanceName,
+        serverUrl: serverUrl,
+      },
+      include: {
+        configIA: true,
+        user: true,
+      },
+    });
+
+    const configs = {
+      evolutionInstance: instanceName,
+      serverUrl: serverUrl,
+      apikey: apikey,
+    };
+
+    if (evolutionInstance) {
+      logInfo("Evolution instance found in database", {
+        instanceId: evolutionInstance.id,
+        userId: evolutionInstance.userId,
+        configIAId: evolutionInstance.configIAId,
+        configIAName: evolutionInstance.configIA?.nome,
+        aiPrompt: evolutionInstance.configIA?.prompt ? "Present" : "Not present",
+      });
+
+      return {
+        ...configs,
+        instanceId: evolutionInstance.id,
+        configIAId: evolutionInstance.configIAId || undefined,
+        userId: evolutionInstance.userId,
+        aiPrompt: evolutionInstance.configIA?.prompt || undefined,
+      };
+    } else {
+      logInfo("Evolution instance not found in database", {
+        instanceName,
+        serverUrl: serverUrl?.substring(0, 50) + "...",
+      });
+
+      return configs;
+    }
+  } catch (error) {
+    logError("Error creating configs object", error as Error);
+    return {
+      evolutionInstance: instanceName,
+      serverUrl: serverUrl,
+      apikey: apikey,
+    };
   }
 }
 
@@ -280,4 +579,166 @@ function extractMessageContent(message: EvolutionMessage, messageType: string) {
 function extractPhoneNumber(jid: string): string {
   // Extract phone number from WhatsApp JID format
   return jid.split("@")[0] || jid;
+}
+
+// Function to download media and convert to base64
+async function downloadMediaAsBase64(
+  url: string,
+  maxSizeMB: number = 5
+): Promise<string | null> {
+  try {
+    logInfo("Downloading media from URL", { url: url.substring(0, 100) });
+
+    const response = await axios.get(url, {
+      responseType: "arraybuffer",
+      timeout: 30000, // 30 seconds timeout
+      maxContentLength: maxSizeMB * 1024 * 1024, // Max size limit
+    });
+
+    if (response.data) {
+      const base64 = Buffer.from(response.data).toString("base64");
+      logInfo("Media downloaded and converted to base64", {
+        size: `${Math.round(base64.length / 1024)}KB`,
+        originalUrl: url.substring(0, 50) + "...",
+      });
+      return base64;
+    }
+
+    return null;
+  } catch (error) {
+    logError("Failed to download media", error as Error);
+    return null;
+  }
+}
+
+// Function to get base64 from thumbnail or download full media
+async function getMediaBase64(
+  message: any,
+  messageType: string
+): Promise<string | null> {
+  try {
+    // For images, try to use jpegThumbnail first (already base64)
+    if (messageType === "imageMessage" && message.imageMessage?.jpegThumbnail) {
+      logInfo("Using jpegThumbnail for image base64");
+      return message.imageMessage.jpegThumbnail;
+    }
+
+    // For videos, try to use jpegThumbnail first (already base64)
+    if (messageType === "videoMessage" && message.videoMessage?.jpegThumbnail) {
+      logInfo("Using jpegThumbnail for video base64");
+      return message.videoMessage.jpegThumbnail;
+    }
+
+    // If no thumbnail or other media types, download from URL
+    let mediaUrl = null;
+
+    switch (messageType) {
+      case "imageMessage":
+        mediaUrl = message.imageMessage?.url;
+        break;
+      case "videoMessage":
+        mediaUrl = message.videoMessage?.url;
+        break;
+      case "documentMessage":
+        mediaUrl = message.documentMessage?.url;
+        break;
+      case "audioMessage":
+        mediaUrl = message.audioMessage?.url;
+        break;
+      case "stickerMessage":
+        mediaUrl = message.stickerMessage?.url;
+        break;
+    }
+
+    if (mediaUrl) {
+      return await downloadMediaAsBase64(mediaUrl);
+    }
+
+    return null;
+  } catch (error) {
+    logError("Failed to get media base64", error as Error);
+    return null;
+  }
+}
+
+// Function to send message data to N8N webhook
+async function sendToN8N(
+  savedMessage: any,
+  originalWebhook: EvolutionWebhookBody
+): Promise<void> {
+  try {
+    const n8nPayload = {
+      // Original webhook data
+      originalWebhook,
+
+      // Processed message data
+      processedMessage: {
+        id: savedMessage.id,
+        sessionId: savedMessage.sessionId,
+        message: savedMessage.message,
+        direction: savedMessage.direction,
+        createdAt: savedMessage.createdAt,
+
+        // Evolution API fields
+        messageId: savedMessage.messageId,
+        instanceName: savedMessage.instanceName,
+        chatId: savedMessage.chatId,
+        senderId: savedMessage.senderId,
+        senderName: savedMessage.senderName,
+        messageType: savedMessage.messageType,
+        content: savedMessage.content,
+        mediaUrl: savedMessage.mediaUrl,
+        mediaType: savedMessage.mediaType,
+        mediaBase64: savedMessage.mediaBase64,
+        caption: savedMessage.caption,
+        fileName: savedMessage.fileName,
+        timestamp: savedMessage.timestamp,
+        isGroup: savedMessage.isGroup,
+        status: savedMessage.status,
+        processed: savedMessage.processed,
+
+        // AI Chat Memory fields
+        action: savedMessage.action,
+        input: savedMessage.input,
+        system_message: savedMessage.system_message,
+      },
+
+      // Processing metadata
+      processingInfo: {
+        processedAt: new Date().toISOString(),
+        hasMedia: !!savedMessage.mediaBase64,
+        mediaSize: savedMessage.mediaBase64
+          ? `${Math.round(savedMessage.mediaBase64.length / 1024)}KB`
+          : null,
+      },
+    };
+
+    logInfo("Sending message to N8N webhook", {
+      n8nUrl: ENV.N8N_WEBHOOK_URL?.substring(0, 50) + "...",
+      messageId: savedMessage.messageId,
+      messageType: savedMessage.messageType,
+      hasMedia: !!savedMessage.mediaBase64,
+    });
+
+    const response = await axios.post(ENV.N8N_WEBHOOK_URL!, n8nPayload, {
+      timeout: 10000, // 10 seconds timeout
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "Evolution-Webhook-Forwarder/1.0",
+      },
+    });
+
+    logInfo("Message successfully sent to N8N", {
+      messageId: savedMessage.messageId,
+      responseStatus: response.status,
+      responseData: response.data,
+    });
+  } catch (error) {
+    logError("Failed to send message to N8N webhook", {
+      error: error instanceof Error ? error.message : "Unknown error",
+      messageId: savedMessage.messageId,
+      n8nUrl: ENV.N8N_WEBHOOK_URL?.substring(0, 50) + "...",
+    });
+    throw error;
+  }
 }

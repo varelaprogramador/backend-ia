@@ -178,6 +178,20 @@ export const fastifyLogger = {
       messageFormat: '{msg}',
     },
   },
+  // Custom serializers to handle errors
+  serializers: {
+    err: (err: any) => {
+      // Suppress premature close errors completely
+      if (err.message === 'premature close' || 
+          err.message?.includes('premature close') ||
+          err.type === 'ClientDisconnectionWarning') {
+        return null; // Don't log at all
+      }
+      return pino.stdSerializers.err(err);
+    },
+    req: pino.stdSerializers.req,
+    res: pino.stdSerializers.res
+  }
 }
 /**
  * Loga uma mensagem de informação.
@@ -213,6 +227,20 @@ export const logWarn = (msg: string, meta?: unknown) => {
  * @param meta (Opcional) Objeto com dados adicionais estruturados ou erro - será sanitizado automaticamente
  */
 export const logError = (msg: string, meta?: unknown) => {
+  // Check if this is a premature close error and handle it gracefully
+  if (meta && typeof meta === 'object') {
+    const errorObj = meta as any;
+    if (errorObj.err?.message === 'premature close' || 
+        errorObj.message === 'premature close' ||
+        errorObj.error === 'premature close' ||
+        msg.includes('premature close')) {
+      // Log as warning instead of error for premature close
+      const sanitizedMeta = sanitizeLogData(meta)
+      logger.warn(sanitizedMeta, `Client connection closed: ${msg}`)
+      return;
+    }
+  }
+
   if (meta) {
     const sanitizedMeta = sanitizeLogData(meta)
     logger.error(sanitizedMeta, msg)

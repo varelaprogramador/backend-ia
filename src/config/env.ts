@@ -62,6 +62,17 @@ const envSchema = z.object({
     .default("120000") // 2 minutes
     .transform(Number)
     .pipe(z.number().min(30000).max(600000)), // 30s to 10min
+
+  // N8N Webhook Configuration
+  N8N_WEBHOOK_URL: z
+    .string()
+    .url("N8N_WEBHOOK_URL deve ser uma URL válida")
+    .optional(),
+
+  // My Phone Number for message identification
+  MY_PHONE_NUMBER: z
+    .string()
+    .optional()
 });
 
 // Tipagem das variáveis de ambiente validadas
@@ -134,6 +145,12 @@ export const ENV = {
       env.SOCKET_IO_CONNECTION_STATE_RECOVERY === "true",
     MAX_DISCONNECTION_DURATION: env.SOCKET_IO_MAX_DISCONNECTION_DURATION,
   },
+
+  // N8N Webhook
+  N8N_WEBHOOK_URL: env.N8N_WEBHOOK_URL,
+
+  // My Phone Number
+  MY_PHONE_NUMBER: env.MY_PHONE_NUMBER,
 } as const;
 
 // Exportação legacy para compatibilidade

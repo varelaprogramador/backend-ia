@@ -6,6 +6,15 @@ type ApiResponse = {
   error?: string
   message?: string
   data?: any
+  metadata?: any
+}
+
+type FormatResponseOptions = {
+  success?: boolean
+  message?: string
+  error?: string
+  data?: any
+  metadata?: any
 }
 
 /**
@@ -50,4 +59,27 @@ export const sendError = (
   }
 
   return reply.status(status).send(response)
+}
+
+/**
+ * Formata uma resposta padronizada (para uso com return)
+ */
+export const formatResponse = (options: FormatResponseOptions = {}): ApiResponse => {
+  const { 
+    success = true, 
+    message, 
+    error, 
+    data, 
+    metadata 
+  } = options
+
+  const response: ApiResponse = {
+    success: success && !error,
+    ...(message && { message }),
+    ...(error && { error }),
+    ...(data !== undefined && { data }),
+    ...(metadata && { metadata }),
+  }
+
+  return response
 }

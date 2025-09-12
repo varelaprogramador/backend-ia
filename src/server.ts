@@ -18,7 +18,8 @@ import { ENV } from "@/config/env";
 
 import { UserSyncService } from "@/services/user-sync";
 import type { BatchManager, RealtimePayload } from "@/types/IO";
-import { fastifyLogger, logError, logInfo, logWarn } from "@/utils/logger";
+import { logError, logInfo, logWarn } from "@/utils/logger";
+import { createFilteredFastifyLogger } from "@/utils/filtered-logger";
 
 // Estende o tipo FastifyInstance para incluir io
 declare module "fastify" {
@@ -29,7 +30,7 @@ declare module "fastify" {
 }
 
 const app = Fastify({
-  logger: fastifyLogger,
+  logger: false, // Disable Fastify's built-in logging completely to prevent premature close errors
   disableRequestLogging: true, // Always disabled for performance
   connectionTimeout: 30000, // 30 seconds (optimized from 60s)
   keepAliveTimeout: 30000, // 30 seconds (optimized from 60s)
@@ -47,8 +48,73 @@ const app = Fastify({
   },
 });
 
+// Add server-level error handler for connection issues
+app.server.on('clientError', (err, socket) => {
+  if (err.message === 'premature close' || err.message.includes('premature close')) {
+    // Handle premature close gracefully - don't log as error
+    logInfo('Client connection closed during request processing', {
+      error: err.message,
+      remoteAddress: socket.remoteAddress
+    });
+  } else {
+    logError('Client error on server socket', {
+      error: err.message,
+      remoteAddress: socket.remoteAddress
+    });
+  }
+  
+  // Close socket gracefully
+  if (!socket.destroyed) {
+    socket.end();
+  }
+});
+
+// Handle connection errors on the HTTP server
+app.server.on('connection', (socket) => {
+  socket.on('error', (err) => {
+    if (err.message === 'premature close' || err.message.includes('premature close')) {
+      logInfo('Socket connection error handled gracefully', {
+        error: err.message,
+        remoteAddress: socket.remoteAddress
+      });
+    } else {
+      logError('Socket error', {
+        error: err.message,
+        remoteAddress: socket.remoteAddress
+      });
+    }
+  });
+});
+
+// Since we disabled Fastify's logger, we don't need to override it
+
 // Clerk Plugin
 app.register(clerkPlugin);
+
+// Custom content type parser for empty bodies on specific endpoints
+app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
+  const url = (req as any).url || '';
+  
+  // Check if this is an endpoint that allows empty body
+  const isEmptyBodyEndpoint = Array.from(ALLOW_EMPTY_BODY_PATHS).some(path => 
+    url.includes(path)
+  );
+  
+  if (body === '' && isEmptyBodyEndpoint) {
+    // Return empty object for empty bodies on allowed endpoints
+    done(null, {});
+    return;
+  }
+  
+  // Normal JSON parsing for non-empty bodies or other endpoints
+  try {
+    const parsed = body === '' ? {} : JSON.parse(body as string);
+    done(null, parsed);
+  } catch (err) {
+    (err as any).statusCode = 400;
+    done(err as Error, undefined);
+  }
+});
 
 // Configuração do Under Pressure para monitoramento de pressão
 app.register(underPressure, {
@@ -135,11 +201,36 @@ const SKIP_VALIDATION_PATHS = new Set([
   "/android-chrome-512x512.png",
   "/site.webmanifest",
 ]);
+
+const ALLOW_EMPTY_BODY_PATHS = new Set([
+  "/connect",
+  "/logout",
+  "/disconnect",
+  "/restart",
+]);
 const WRITE_METHODS = new Set(["POST", "PUT", "PATCH"]);
 
 // Lightweight performance tracking (only for slow requests)
 app.addHook("onRequest", async (request) => {
   (request as any).startTime = Date.now();
+  
+  // Handle connection errors at request level
+  request.raw.on('error', (error) => {
+    if (!error.message.includes('premature close') && 
+        !error.message.includes('ECONNRESET') && 
+        !error.message.includes('EPIPE')) {
+      logError("Request stream error", error);
+    }
+    // Suppress premature close errors completely
+  });
+
+  request.raw.on('close', () => {
+    // Don't log close events as they're normal behavior
+  });
+
+  request.raw.on('aborted', () => {
+    // Don't log aborted events as they're normal behavior
+  });
 });
 
 app.addHook("onResponse", async (request, reply) => {
@@ -153,6 +244,21 @@ app.addHook("onResponse", async (request, reply) => {
       statusCode: reply.statusCode,
     });
   }
+});
+
+// Add onSend hook to handle premature close during response sending
+app.addHook("onSend", async (request, reply, payload) => {
+  // Check if connection is still active before sending
+  if (request.raw.destroyed || request.raw.readableEnded) {
+    // Don't log - this is expected behavior for disconnected clients
+    // Check if response was already sent to prevent header errors
+    if (reply.sent) {
+      return payload;
+    }
+    return "";
+  }
+  
+  return payload;
 });
 
 // Configuração do Socket.IO
@@ -548,35 +654,66 @@ app.addHook("preHandler", async (request, reply) => {
   // Content-Type validation for write operations (optimized)
   if (WRITE_METHODS.has(request.method)) {
     const contentType = request.headers["content-type"];
+    
+    // Check if this is an endpoint that allows empty body
+    const isEmptyBodyEndpoint = Array.from(ALLOW_EMPTY_BODY_PATHS).some(path => 
+      request.url.includes(path)
+    );
 
-    if (!contentType) {
+    if (!contentType && !isEmptyBodyEndpoint) {
       return reply.code(400).send({
         error: "Bad Request",
         message: "Content-Type header é obrigatório",
       });
     }
 
-    // Fast Set-based validation instead of string.includes()
-    let validContentType = false;
-    for (const validType of VALID_CONTENT_TYPES) {
-      if (contentType.includes(validType)) {
-        validContentType = true;
-        break;
+    if (contentType) {
+      // Fast Set-based validation instead of string.includes()
+      let validContentType = false;
+      for (const validType of VALID_CONTENT_TYPES) {
+        if (contentType.includes(validType)) {
+          validContentType = true;
+          break;
+        }
+      }
+
+      if (!validContentType) {
+        return reply.code(415).send({
+          error: "Unsupported Media Type",
+          message:
+            "Content-Type deve ser application/json ou multipart/form-data",
+        });
       }
     }
+  }
+});
 
-    if (!validContentType) {
-      return reply.code(415).send({
-        error: "Unsupported Media Type",
-        message:
-          "Content-Type deve ser application/json ou multipart/form-data",
-      });
-    }
+// Add hook to suppress premature close errors before they reach the error handler
+app.addHook('onError', async (request, reply, error) => {
+  if (error.message === 'premature close' || 
+      error.code === 'ECONNRESET' || 
+      error.code === 'EPIPE' ||
+      error.message.includes('premature close')) {
+    // Suppress the error completely
+    return;
   }
 });
 
 // Enhanced error handler
 app.setErrorHandler((error, request, reply) => {
+  // Handle premature close errors gracefully - don't log as errors
+  if (error.message === 'premature close' || 
+      error.code === 'ECONNRESET' || 
+      error.code === 'EPIPE' ||
+      error.message.includes('premature close') ||
+      error.name === 'ClientDisconnectedError' ||
+      error.message.includes('Client disconnected') ||
+      error.code === 'ERR_HTTP_HEADERS_SENT' ||
+      error.message.includes('Cannot write headers after they are sent')) {
+    // Don't log or send response for connection-related errors
+    return;
+  }
+
   // Log error with context (sanitization will be done automatically by logError)
   const errorData = {
     message: error.message,
@@ -646,12 +783,39 @@ app.setNotFoundHandler((request, reply) => {
 
 // Process error handlers
 process.on("uncaughtException", (error) => {
+  // Handle premature close errors gracefully
+  if (error.message === 'premature close' || 
+      error.message.includes('premature close') ||
+      error.code === 'ECONNRESET' || 
+      error.code === 'EPIPE') {
+    // Log as warning instead of error for premature close
+    logWarn("Uncaught premature close handled gracefully", { error: error.message });
+    return;
+  }
+  
   logError("Uncaught Exception", error);
   // Don't exit immediately, let graceful shutdown handle it
 });
 
 process.on("unhandledRejection", (reason, _promise) => {
-  logError("Unhandled Rejection", reason as Error);
+  const error = reason as Error;
+  
+  // Handle premature close and header errors gracefully
+  if (error?.message === 'premature close' || 
+      error?.message?.includes('premature close') ||
+      error?.message?.includes('Client disconnected') ||
+      error?.message?.includes('Cannot write headers after they are sent') ||
+      (error as any)?.code === 'ECONNRESET' || 
+      (error as any)?.code === 'EPIPE' ||
+      (error as any)?.code === 'ERR_HTTP_HEADERS_SENT') {
+    // Log as warning instead of error for connection issues
+    logWarn("Unhandled connection rejection handled gracefully", { 
+      error: error?.message || String(reason) 
+    });
+    return;
+  }
+  
+  logError("Unhandled Rejection", error);
 });
 
 // User synchronization cron job
