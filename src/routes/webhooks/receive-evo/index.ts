@@ -298,6 +298,78 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
     return null;
   }
 
+  // Check if the number is deactivated for a specific agent
+  if (configs.configIAId) {
+    const normalizedPhoneNumber = phoneNumber.replace(/[^\d]/g, '');
+    
+    // Generate both possible formats for Brazilian mobile numbers
+    // Original: 553484443047 (10 digits after country code)
+    // With 9: 5534984443047 (11 digits after country code - newer format)
+    const possibleNumbers = [normalizedPhoneNumber];
+    
+    // If it's a Brazilian number (55) and has 10 digits after country code, try adding 9
+    if (normalizedPhoneNumber.startsWith('55') && normalizedPhoneNumber.length === 12) {
+      const areaCode = normalizedPhoneNumber.substring(2, 4);
+      const number = normalizedPhoneNumber.substring(4);
+      const withNine = `55${areaCode}9${number}`;
+      possibleNumbers.push(withNine);
+    }
+    
+    // If it's a Brazilian number with 11 digits after country code, try removing 9
+    if (normalizedPhoneNumber.startsWith('55') && normalizedPhoneNumber.length === 13) {
+      const areaCode = normalizedPhoneNumber.substring(2, 4);
+      const possibleNine = normalizedPhoneNumber.substring(4, 5);
+      const number = normalizedPhoneNumber.substring(5);
+      if (possibleNine === '9') {
+        const withoutNine = `55${areaCode}${number}`;
+        possibleNumbers.push(withoutNine);
+      }
+    }
+    
+    logInfo("Checking if number is deactivated for agent", {
+      originalRemoteJid: key.remoteJid,
+      extractedPhoneNumber: phoneNumber,
+      normalizedPhoneNumber: normalizedPhoneNumber,
+      possibleNumbers: possibleNumbers,
+      configIAId: configs.configIAId,
+      messageId: key.id,
+      transformation: `${key.remoteJid} → ${phoneNumber} → ${normalizedPhoneNumber}`,
+    });
+    
+    // Check all possible number variations
+    const deactivatedAgent = await db.deactivatedAgent.findFirst({
+      where: {
+        configIAId: configs.configIAId,
+        phoneNumber: {
+          in: possibleNumbers,
+        },
+      },
+    });
+
+    if (deactivatedAgent && deactivatedAgent.isActive) {
+      logInfo("Skipping message from number deactivated for this agent", {
+        remoteJid: key.remoteJid,
+        phoneNumber: normalizedPhoneNumber,
+        matchedNumber: deactivatedAgent.phoneNumber,
+        configIAId: configs.configIAId,
+        messageId: key.id,
+        reason: deactivatedAgent.reason || "Number deactivated for this agent",
+        deactivatedBy: deactivatedAgent.blockedBy,
+        deactivatedAt: deactivatedAgent.createdAt.toISOString(),
+      });
+      return null;
+    } else {
+      logInfo("Number is not deactivated, processing message", {
+        normalizedPhoneNumber: normalizedPhoneNumber,
+        possibleNumbers: possibleNumbers,
+        configIAId: configs.configIAId,
+        messageId: key.id,
+        deactivatedAgentFound: !!deactivatedAgent,
+        isActive: deactivatedAgent?.isActive || false,
+      });
+    }
+  }
+
   try {
     // Get media as base64 if it's a media message
     let mediaBase64: string | null = null;
@@ -421,6 +493,7 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
     });
 
     // Send to N8N webhook if configured and not from me and ConfigIA is active
+    // Note: Messages from deactivated numbers are already filtered out earlier in the processWebhook function
     if (ENV.N8N_WEBHOOK_URL && !key.fromMe) {
       // Check if ConfigIA is active before sending to N8N
       const isConfigIAActive = configs.configIAId && 
@@ -605,7 +678,14 @@ function extractMessageContent(message: EvolutionMessage, messageType: string) {
 
 function extractPhoneNumber(jid: string): string {
   // Extract phone number from WhatsApp JID format
-  return jid.split("@")[0] || jid;
+  // Examples: 
+  // - "5534984443047@s.whatsapp.net" → "5534984443047"
+  // - "553484443047@s.whatsapp.net" → "553484443047"
+  // - "5534984443047" → "5534984443047"
+  const phoneOnly = jid.split("@")[0] || jid;
+  
+  // Remove any non-digit characters and normalize
+  return phoneOnly.replace(/[^\d]/g, '');
 }
 
 // Function to download media and convert to base64

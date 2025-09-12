@@ -47,6 +47,7 @@ model User {
   configIAs          ConfigIA[]
   blockedContacts    BlockedContact[]
   evolutionInstances EvolutionInstance[]
+  deactivatedAgents  DeactivatedAgent[]
 
   @@map("users")
 }
@@ -176,6 +177,9 @@ model ConfigIA {
 
   // Relação com Evolution Instances
   evolutionInstances EvolutionInstance[]
+  
+  // Relação com números desativados
+  deactivatedAgents  DeactivatedAgent[]
 
   @@index([userId])
   @@map("config_ia")
@@ -217,6 +221,28 @@ model EvolutionInstance {
   @@index([status])
   @@index([configIAId])
   @@map("evolution_instances")
+}
+
+model DeactivatedAgent {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  configIAId     String
+  configIA       ConfigIA @relation(fields: [configIAId], references: [id], onDelete: Cascade)
+  phoneNumber    String   // Número de telefone a ser bloqueado (formato: +5511999999999)
+  reason         String?  // Motivo do bloqueio (opcional)
+  isActive       Boolean  @default(true) // Se o bloqueio está ativo
+  blockedBy      String?  // Quem fez o bloqueio
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // Índices para performance
+  @@index([userId])
+  @@index([configIAId])
+  @@index([phoneNumber])
+  @@index([isActive])
+  @@unique([configIAId, phoneNumber]) // Um número pode ser bloqueado apenas uma vez por agente
+  @@map("deactivated_agents")
 }
 
 model SystemConfig {
