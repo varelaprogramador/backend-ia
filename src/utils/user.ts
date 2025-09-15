@@ -134,9 +134,9 @@ export const createUser = async (user: {
     lastName: user.lastName || "",
     skipPasswordRequirement: true,
     firstName: user.firstName || "",
-    publicMetadata: user.publicMetadata || {},
-    unsafeMetadata: user.unsafeMetadata || {},
-    privateMetadata: user.privateMetadata || {},
+    publicMetadata: (user.publicMetadata || {}) as any,
+    unsafeMetadata: (user.unsafeMetadata || {}) as any,
+    privateMetadata: (user.privateMetadata || {}) as any,
     ...(user.password && { password: user.password }),
   });
 
@@ -356,9 +356,12 @@ export const findOrUpdateUserByEmail = async (userData: {
     const updatedUser = await clerkClient.users.updateUser(existingUser.id, {
       firstName: userData.firstName,
       lastName: userData.lastName,
-      publicMetadata: userData.publicMetadata
-        ? { ...existingUser.publicMetadata, ...userData.publicMetadata }
-        : existingUser.publicMetadata,
+      publicMetadata: (userData.publicMetadata
+        ? {
+            ...(existingUser.publicMetadata as any),
+            ...(userData.publicMetadata as any),
+          }
+        : (existingUser.publicMetadata as any)) as any,
       unsafeMetadata: userData.unsafeMetadata
         ? { ...existingUser.unsafeMetadata, ...userData.unsafeMetadata }
         : existingUser.unsafeMetadata,
