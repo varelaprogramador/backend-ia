@@ -49,20 +49,23 @@ const app = Fastify({
 });
 
 // Add server-level error handler for connection issues
-app.server.on('clientError', (err, socket) => {
-  if (err.message === 'premature close' || err.message.includes('premature close')) {
+app.server.on("clientError", (err, socket) => {
+  if (
+    err.message === "premature close" ||
+    err.message.includes("premature close")
+  ) {
     // Handle premature close gracefully - don't log as error
-    logInfo('Client connection closed during request processing', {
+    logInfo("Client connection closed durante o processamento da requisição", {
       error: err.message,
-      remoteAddress: socket.remoteAddress
+      remoteAddress: (socket as any).remoteAddress,
     });
   } else {
-    logError('Client error on server socket', {
+    logError("Client error on server socket", {
       error: err.message,
-      remoteAddress: socket.remoteAddress
+      remoteAddress: (socket as any).remoteAddress,
     });
   }
-  
+
   // Close socket gracefully
   if (!socket.destroyed) {
     socket.end();
@@ -70,17 +73,20 @@ app.server.on('clientError', (err, socket) => {
 });
 
 // Handle connection errors on the HTTP server
-app.server.on('connection', (socket) => {
-  socket.on('error', (err) => {
-    if (err.message === 'premature close' || err.message.includes('premature close')) {
-      logInfo('Socket connection error handled gracefully', {
+app.server.on("connection", (socket) => {
+  socket.on("error", (err) => {
+    if (
+      err.message === "premature close" ||
+      err.message.includes("premature close")
+    ) {
+      logInfo("Socket connection error handled gracefully", {
         error: err.message,
-        remoteAddress: socket.remoteAddress
+        remoteAddress: socket.remoteAddress,
       });
     } else {
-      logError('Socket error', {
+      logError("Socket error", {
         error: err.message,
-        remoteAddress: socket.remoteAddress
+        remoteAddress: socket.remoteAddress,
       });
     }
   });
@@ -92,29 +98,33 @@ app.server.on('connection', (socket) => {
 app.register(clerkPlugin);
 
 // Custom content type parser for empty bodies on specific endpoints
-app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
-  const url = (req as any).url || '';
-  
-  // Check if this is an endpoint that allows empty body
-  const isEmptyBodyEndpoint = Array.from(ALLOW_EMPTY_BODY_PATHS).some(path => 
-    url.includes(path)
-  );
-  
-  if (body === '' && isEmptyBodyEndpoint) {
-    // Return empty object for empty bodies on allowed endpoints
-    done(null, {});
-    return;
+app.addContentTypeParser(
+  "application/json",
+  { parseAs: "string" },
+  (req, body, done) => {
+    const url = (req as any).url || "";
+
+    // Check if this is an endpoint that allows empty body
+    const isEmptyBodyEndpoint = Array.from(ALLOW_EMPTY_BODY_PATHS).some(
+      (path) => url.includes(path)
+    );
+
+    if (body === "" && isEmptyBodyEndpoint) {
+      // Return empty object for empty bodies on allowed endpoints
+      done(null, {});
+      return;
+    }
+
+    // Normal JSON parsing for non-empty bodies or other endpoints
+    try {
+      const parsed = body === "" ? {} : JSON.parse(body as string);
+      done(null, parsed);
+    } catch (err) {
+      (err as any).statusCode = 400;
+      done(err as Error, undefined);
+    }
   }
-  
-  // Normal JSON parsing for non-empty bodies or other endpoints
-  try {
-    const parsed = body === '' ? {} : JSON.parse(body as string);
-    done(null, parsed);
-  } catch (err) {
-    (err as any).statusCode = 400;
-    done(err as Error, undefined);
-  }
-});
+);
 
 // Configuração do Under Pressure para monitoramento de pressão
 app.register(underPressure, {
@@ -213,22 +223,24 @@ const WRITE_METHODS = new Set(["POST", "PUT", "PATCH"]);
 // Lightweight performance tracking (only for slow requests)
 app.addHook("onRequest", async (request) => {
   (request as any).startTime = Date.now();
-  
+
   // Handle connection errors at request level
-  request.raw.on('error', (error) => {
-    if (!error.message.includes('premature close') && 
-        !error.message.includes('ECONNRESET') && 
-        !error.message.includes('EPIPE')) {
+  request.raw.on("error", (error) => {
+    if (
+      !error.message.includes("premature close") &&
+      !error.message.includes("ECONNRESET") &&
+      !error.message.includes("EPIPE")
+    ) {
       logError("Request stream error", error);
     }
     // Suppress premature close errors completely
   });
 
-  request.raw.on('close', () => {
+  request.raw.on("close", () => {
     // Don't log close events as they're normal behavior
   });
 
-  request.raw.on('aborted', () => {
+  request.raw.on("aborted", () => {
     // Don't log aborted events as they're normal behavior
   });
 });
@@ -257,7 +269,7 @@ app.addHook("onSend", async (request, reply, payload) => {
     }
     return "";
   }
-  
+
   return payload;
 });
 
@@ -654,10 +666,10 @@ app.addHook("preHandler", async (request, reply) => {
   // Content-Type validation for write operations (optimized)
   if (WRITE_METHODS.has(request.method)) {
     const contentType = request.headers["content-type"];
-    
+
     // Check if this is an endpoint that allows empty body
-    const isEmptyBodyEndpoint = Array.from(ALLOW_EMPTY_BODY_PATHS).some(path => 
-      request.url.includes(path)
+    const isEmptyBodyEndpoint = Array.from(ALLOW_EMPTY_BODY_PATHS).some(
+      (path) => request.url.includes(path)
     );
 
     if (!contentType && !isEmptyBodyEndpoint) {
@@ -689,11 +701,13 @@ app.addHook("preHandler", async (request, reply) => {
 });
 
 // Add hook to suppress premature close errors before they reach the error handler
-app.addHook('onError', async (request, reply, error) => {
-  if (error.message === 'premature close' || 
-      error.code === 'ECONNRESET' || 
-      error.code === 'EPIPE' ||
-      error.message.includes('premature close')) {
+app.addHook("onError", async (request, reply, error) => {
+  if (
+    error.message === "premature close" ||
+    error.code === "ECONNRESET" ||
+    error.code === "EPIPE" ||
+    error.message.includes("premature close")
+  ) {
     // Suppress the error completely
     return;
   }
@@ -702,14 +716,16 @@ app.addHook('onError', async (request, reply, error) => {
 // Enhanced error handler
 app.setErrorHandler((error, request, reply) => {
   // Handle premature close errors gracefully - don't log as errors
-  if (error.message === 'premature close' || 
-      error.code === 'ECONNRESET' || 
-      error.code === 'EPIPE' ||
-      error.message.includes('premature close') ||
-      error.name === 'ClientDisconnectedError' ||
-      error.message.includes('Client disconnected') ||
-      error.code === 'ERR_HTTP_HEADERS_SENT' ||
-      error.message.includes('Cannot write headers after they are sent')) {
+  if (
+    error.message === "premature close" ||
+    error.code === "ECONNRESET" ||
+    error.code === "EPIPE" ||
+    error.message.includes("premature close") ||
+    error.name === "ClientDisconnectedError" ||
+    error.message.includes("Client disconnected") ||
+    error.code === "ERR_HTTP_HEADERS_SENT" ||
+    error.message.includes("Cannot write headers after they are sent")
+  ) {
     // Don't log or send response for connection-related errors
     return;
   }
@@ -784,37 +800,43 @@ app.setNotFoundHandler((request, reply) => {
 // Process error handlers
 process.on("uncaughtException", (error) => {
   // Handle premature close errors gracefully
-  if (error.message === 'premature close' || 
-      error.message.includes('premature close') ||
-      error.code === 'ECONNRESET' || 
-      error.code === 'EPIPE') {
+  if (
+    error.message === "premature close" ||
+    error.message.includes("premature close") ||
+    (error as any).code === "ECONNRESET" ||
+    (error as any).code === "EPIPE"
+  ) {
     // Log as warning instead of error for premature close
-    logWarn("Uncaught premature close handled gracefully", { error: error.message });
+    logWarn("Uncaught premature close handled gracefully", {
+      error: error.message,
+    });
     return;
   }
-  
+
   logError("Uncaught Exception", error);
   // Don't exit immediately, let graceful shutdown handle it
 });
 
 process.on("unhandledRejection", (reason, _promise) => {
   const error = reason as Error;
-  
+
   // Handle premature close and header errors gracefully
-  if (error?.message === 'premature close' || 
-      error?.message?.includes('premature close') ||
-      error?.message?.includes('Client disconnected') ||
-      error?.message?.includes('Cannot write headers after they are sent') ||
-      (error as any)?.code === 'ECONNRESET' || 
-      (error as any)?.code === 'EPIPE' ||
-      (error as any)?.code === 'ERR_HTTP_HEADERS_SENT') {
+  if (
+    error?.message === "premature close" ||
+    error?.message?.includes("premature close") ||
+    error?.message?.includes("Client disconnected") ||
+    error?.message?.includes("Cannot write headers after they are sent") ||
+    (error as any)?.code === "ECONNRESET" ||
+    (error as any)?.code === "EPIPE" ||
+    (error as any)?.code === "ERR_HTTP_HEADERS_SENT"
+  ) {
     // Log as warning instead of error for connection issues
-    logWarn("Unhandled connection rejection handled gracefully", { 
-      error: error?.message || String(reason) 
+    logWarn("Unhandled connection rejection handled gracefully", {
+      error: error?.message || String(reason),
     });
     return;
   }
-  
+
   logError("Unhandled Rejection", error);
 });
 
