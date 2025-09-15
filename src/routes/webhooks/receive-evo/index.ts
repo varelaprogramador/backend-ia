@@ -287,18 +287,7 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
   const normalizedPhoneNumber = phoneNumber.replace(/[^\d]/g, "");
   const isAllowedNumber = allowedNumbers.includes(normalizedPhoneNumber);
 
-  if (!isAllowedNumber) {
-    logInfo("TESTING MODE: Skipping message from non-allowed number", {
-      remoteJid: key.remoteJid,
-      phoneNumber: phoneNumber,
-      normalizedPhoneNumber: normalizedPhoneNumber,
-      messageId: key.id,
-      allowedNumbers: allowedNumbers,
-      reason: "Number not in testing whitelist",
-    });
-    return null;
-  }
-
+  
   // Check for exact match or pattern match (numbers starting with 12)
   const blockedContact = await db.blockedContact.findFirst({
     where: {
