@@ -281,11 +281,12 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
     "5543991120940", // +55 43 9112-0940
     "5543918885778", // +55 43 9188-5778
     "5543847788544", // +55 43 8477-8544
+    "5534984443047",
   ];
-  
-  const normalizedPhoneNumber = phoneNumber.replace(/[^\d]/g, '');
+
+  const normalizedPhoneNumber = phoneNumber.replace(/[^\d]/g, "");
   const isAllowedNumber = allowedNumbers.includes(normalizedPhoneNumber);
-  
+
   if (!isAllowedNumber) {
     logInfo("TESTING MODE: Skipping message from non-allowed number", {
       remoteJid: key.remoteJid,
@@ -322,32 +323,38 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
 
   // Check if the number is deactivated for a specific agent
   if (configs.configIAId) {
-    const normalizedPhoneNumber = phoneNumber.replace(/[^\d]/g, '');
-    
+    const normalizedPhoneNumber = phoneNumber.replace(/[^\d]/g, "");
+
     // Generate both possible formats for Brazilian mobile numbers
     // Original: 553484443047 (10 digits after country code)
     // With 9: 5534984443047 (11 digits after country code - newer format)
     const possibleNumbers = [normalizedPhoneNumber];
-    
+
     // If it's a Brazilian number (55) and has 10 digits after country code, try adding 9
-    if (normalizedPhoneNumber.startsWith('55') && normalizedPhoneNumber.length === 12) {
+    if (
+      normalizedPhoneNumber.startsWith("55") &&
+      normalizedPhoneNumber.length === 12
+    ) {
       const areaCode = normalizedPhoneNumber.substring(2, 4);
       const number = normalizedPhoneNumber.substring(4);
       const withNine = `55${areaCode}9${number}`;
       possibleNumbers.push(withNine);
     }
-    
+
     // If it's a Brazilian number with 11 digits after country code, try removing 9
-    if (normalizedPhoneNumber.startsWith('55') && normalizedPhoneNumber.length === 13) {
+    if (
+      normalizedPhoneNumber.startsWith("55") &&
+      normalizedPhoneNumber.length === 13
+    ) {
       const areaCode = normalizedPhoneNumber.substring(2, 4);
       const possibleNine = normalizedPhoneNumber.substring(4, 5);
       const number = normalizedPhoneNumber.substring(5);
-      if (possibleNine === '9') {
+      if (possibleNine === "9") {
         const withoutNine = `55${areaCode}${number}`;
         possibleNumbers.push(withoutNine);
       }
     }
-    
+
     logInfo("Checking if number is deactivated for agent", {
       originalRemoteJid: key.remoteJid,
       extractedPhoneNumber: phoneNumber,
@@ -357,7 +364,7 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
       messageId: key.id,
       transformation: `${key.remoteJid} → ${phoneNumber} → ${normalizedPhoneNumber}`,
     });
-    
+
     // Check all possible number variations
     const deactivatedAgent = await db.deactivatedAgent.findFirst({
       where: {
@@ -518,9 +525,10 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
     // Note: Messages from deactivated numbers are already filtered out earlier in the processWebhook function
     if (ENV.N8N_WEBHOOK_URL && !key.fromMe) {
       // Check if ConfigIA is active before sending to N8N
-      const isConfigIAActive = configs.configIAId && 
-        await isConfigIAActiveStatus(configs.configIAId);
-        
+      const isConfigIAActive =
+        configs.configIAId &&
+        (await isConfigIAActiveStatus(configs.configIAId));
+
       if (isConfigIAActive) {
         try {
           await sendToN8N(savedMessage, webhook);
@@ -531,7 +539,7 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
         logInfo("ConfigIA is inactive, skipping N8N webhook", {
           configIAId: configs.configIAId,
           configIAStatus: isConfigIAActive ? "ativo" : "inativo",
-          messageId: key.id
+          messageId: key.id,
         });
       }
     }
@@ -548,9 +556,9 @@ async function isConfigIAActiveStatus(configIAId: string): Promise<boolean> {
   try {
     const configIA = await db.configIA.findUnique({
       where: { id: configIAId },
-      select: { status: true }
+      select: { status: true },
     });
-    
+
     return configIA?.status === "ativo";
   } catch (error) {
     logError("Error checking ConfigIA status", error as Error);
@@ -602,7 +610,9 @@ async function createConfigsObject(
         userId: evolutionInstance.userId,
         configIAId: evolutionInstance.configIAId,
         configIAName: evolutionInstance.configIA?.nome,
-        aiPrompt: evolutionInstance.configIA?.prompt ? "Present" : "Not present",
+        aiPrompt: evolutionInstance.configIA?.prompt
+          ? "Present"
+          : "Not present",
       });
 
       return {
@@ -700,14 +710,14 @@ function extractMessageContent(message: EvolutionMessage, messageType: string) {
 
 function extractPhoneNumber(jid: string): string {
   // Extract phone number from WhatsApp JID format
-  // Examples: 
+  // Examples:
   // - "5534984443047@s.whatsapp.net" → "5534984443047"
   // - "553484443047@s.whatsapp.net" → "553484443047"
   // - "5534984443047" → "5534984443047"
   const phoneOnly = jid.split("@")[0] || jid;
-  
+
   // Remove any non-digit characters and normalize
-  return phoneOnly.replace(/[^\d]/g, '');
+  return phoneOnly.replace(/[^\d]/g, "");
 }
 
 // Function to download media and convert to base64
