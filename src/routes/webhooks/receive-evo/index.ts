@@ -278,9 +278,9 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
 
   // TESTING MODE: Only allow these specific numbers
   const allowedNumbers = [
-    "5543991120940", // +55 43 9112-0940
-    "5543918885778", // +55 43 9188-5778
-    "5543847788544", // +55 43 8477-8544
+    "554391120940", // +55 43 9112-0940
+    "554391885778", // +55 43 9188-5778
+    "554384778544", // +55 43 8477-8544
     "553484443047",
   ];
 
