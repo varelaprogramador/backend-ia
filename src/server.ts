@@ -37,7 +37,7 @@ const app = Fastify({
   requestTimeout: 15000, // 15 seconds (optimized from 30s)
   onProtoPoisoning: "remove",
   onConstructorPoisoning: "remove",
-  bodyLimit: 10 * 1024 * 1024, // 10MB limit
+  bodyLimit: Number.MAX_SAFE_INTEGER, // Sem limite prático de tamanho
   maxParamLength: 500, // Prevent long URL parameters
   caseSensitive: true,
   ignoreTrailingSlash: true,
@@ -624,82 +624,6 @@ app.register(autoload, {
   // ignorePattern: /^(?!.*(post|get|delete|put|patch)\.ts$).*/,
 });
 
-import {
-  requestSanitizationMiddleware,
-  responseSecurityMiddleware,
-  securityMiddleware,
-} from "@/middlewares/security";
-
-// Apply security middlewares
-app.addHook(
-  "preHandler",
-  securityMiddleware({
-    enableRequestId: true,
-    enableSecurityHeaders: true,
-    maxRequestSize: 10 * 1024 * 1024, // 10MB
-  })
-);
-
-app.addHook("preHandler", requestSanitizationMiddleware());
-app.addHook("onSend", responseSecurityMiddleware());
-
-// Optimized consolidated validation middleware
-app.addHook("preHandler", async (request, reply) => {
-  // Fast path: skip validation for static/health endpoints
-  if (
-    SKIP_VALIDATION_PATHS.has(request.url) ||
-    request.url.startsWith("/public/")
-  ) {
-    return;
-  }
-
-  // Validate request size early (fast check)
-  const contentLength = request.headers["content-length"];
-  if (contentLength && parseInt(contentLength) > 10485760) {
-    // 10MB in bytes
-    return reply.code(413).send({
-      error: "Payload Too Large",
-      message: "Request body excede o limite de 10MB",
-    });
-  }
-
-  // Content-Type validation for write operations (optimized)
-  if (WRITE_METHODS.has(request.method)) {
-    const contentType = request.headers["content-type"];
-
-    // Check if this is an endpoint that allows empty body
-    const isEmptyBodyEndpoint = Array.from(ALLOW_EMPTY_BODY_PATHS).some(
-      (path) => request.url.includes(path)
-    );
-
-    if (!contentType && !isEmptyBodyEndpoint) {
-      return reply.code(400).send({
-        error: "Bad Request",
-        message: "Content-Type header é obrigatório",
-      });
-    }
-
-    if (contentType) {
-      // Fast Set-based validation instead of string.includes()
-      let validContentType = false;
-      for (const validType of VALID_CONTENT_TYPES) {
-        if (contentType.includes(validType)) {
-          validContentType = true;
-          break;
-        }
-      }
-
-      if (!validContentType) {
-        return reply.code(415).send({
-          error: "Unsupported Media Type",
-          message:
-            "Content-Type deve ser application/json ou multipart/form-data",
-        });
-      }
-    }
-  }
-});
-
 // Add hook to suppress premature close errors before they reach the error handler
 app.addHook("onError", async (request, reply, error) => {
   if (
@@ -952,7 +876,7 @@ app.listen(
     // Log server configuration
     if (ENV.IS_DEVELOPMENT) {
       logInfo("Server configuration", {
-        bodyLimit: "10MB",
+        bodyLimit: "Unlimited",
         requestTimeout: "15s",
         connectionTimeout: "30s",
         rateLimitEnabled: false,
