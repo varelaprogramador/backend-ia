@@ -134,7 +134,7 @@ export const createUser = async (user: {
     lastName: user.lastName || "",
     skipPasswordRequirement: true,
     firstName: user.firstName || "",
-    publicMetadata: (user.publicMetadata || {}) as any,
+    publicMetadata: { role: 'user', ...(user.publicMetadata || {}) } as any,
     unsafeMetadata: (user.unsafeMetadata || {}) as any,
     privateMetadata: (user.privateMetadata || {}) as any,
     ...(user.password && { password: user.password }),

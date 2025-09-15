@@ -17,7 +17,9 @@ declare module 'fastify' {
 }
 
 declare global {
-  interface UserPublicMetadata {}
+  interface UserPublicMetadata {
+    role: string;
+  }
 }
 
 type AuthOptions = {}
