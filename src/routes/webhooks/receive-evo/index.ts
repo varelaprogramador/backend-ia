@@ -281,7 +281,7 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
     "5543991120940", // +55 43 9112-0940
     "5543918885778", // +55 43 9188-5778
     "5543847788544", // +55 43 8477-8544
-    "5534984443047",
+    "553484443047",
   ];
 
   const normalizedPhoneNumber = phoneNumber.replace(/[^\d]/g, "");
