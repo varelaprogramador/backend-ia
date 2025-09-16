@@ -233,42 +233,18 @@ export class EvolutionInstanceController {
             evolutionCreateUrl
           );
 
+          // URL padrão do webhook se não fornecida
+          const defaultWebhookUrl = data.webhookUrl || data.webhook;
+
           const evolutionPayload = {
             instanceName: data.instanceName,
             integration: "WHATSAPP-BAILEYS",
             qrcode: true,
             webhook: {
-              url: data.webhookUrl || data.webhook || "",
-              byEvents:
-                data.webhookByEvents !== undefined
-                  ? data.webhookByEvents
-                  : true,
-              base64:
-                data.webhookBase64 !== undefined ? data.webhookBase64 : false,
-              events: data.webhookEvents || [
-                "APPLICATION_STARTUP",
-                "QRCODE_UPDATED",
-                "CONNECTION_UPDATE",
-                "STATUS_INSTANCE",
-                "MESSAGES_UPSERT",
-                "MESSAGES_UPDATE",
-                "MESSAGES_DELETE",
-                "SEND_MESSAGE",
-                "CONTACTS_SET",
-                "CONTACTS_UPSERT",
-                "CONTACTS_UPDATE",
-                "PRESENCE_UPDATE",
-                "CHATS_SET",
-                "CHATS_UPSERT",
-                "CHATS_UPDATE",
-                "CHATS_DELETE",
-                "GROUPS_UPSERT",
-                "GROUP_UPDATE",
-                "GROUP_PARTICIPANTS_UPDATE",
-                "NEW_JWT_TOKEN",
-                "TYPEBOT_START",
-                "TYPEBOT_CHANGE_STATUS",
-              ],
+              url: defaultWebhookUrl,
+              byEvents: false, // Sempre desativado para não criar rotas por evento
+              base64: true, // Sempre ativado para receber dados em base64
+              events: ["MESSAGES_UPSERT"], // Apenas mensagens
             },
           };
 
@@ -361,37 +337,10 @@ export class EvolutionInstanceController {
                 connectionState: "DISCONNECTED",
                 status: "active",
                 serverUrl: serverUrl,
-                webhookUrl: data.webhookUrl || data.webhook || "",
-                webhookByEvents:
-                  data.webhookByEvents !== undefined
-                    ? data.webhookByEvents
-                    : true,
-                webhookBase64:
-                  data.webhookBase64 !== undefined ? data.webhookBase64 : false,
-                webhookEvents: data.webhookEvents || [
-                  "APPLICATION_STARTUP",
-                  "QRCODE_UPDATED",
-                  "CONNECTION_UPDATE",
-                  "STATUS_INSTANCE",
-                  "MESSAGES_UPSERT",
-                  "MESSAGES_UPDATE",
-                  "MESSAGES_DELETE",
-                  "SEND_MESSAGE",
-                  "CONTACTS_SET",
-                  "CONTACTS_UPSERT",
-                  "CONTACTS_UPDATE",
-                  "PRESENCE_UPDATE",
-                  "CHATS_SET",
-                  "CHATS_UPSERT",
-                  "CHATS_UPDATE",
-                  "CHATS_DELETE",
-                  "GROUPS_UPSERT",
-                  "GROUP_UPDATE",
-                  "GROUP_PARTICIPANTS_UPDATE",
-                  "NEW_JWT_TOKEN",
-                  "TYPEBOT_START",
-                  "TYPEBOT_CHANGE_STATUS",
-                ],
+                webhookUrl: defaultWebhookUrl,
+                webhookByEvents: false, // Sempre desativado para não criar rotas por evento
+                webhookBase64: true, // Sempre ativado para receber dados em base64
+                webhookEvents: ["MESSAGES_UPSERT"], // Apenas mensagens
                 isDefault: data.isDefault || false,
                 sendConnectionStatus:
                   data.sendConnectionStatus !== undefined
@@ -531,6 +480,9 @@ export class EvolutionInstanceController {
             });
           }
 
+          // URL padrão do webhook se não fornecida (sem servidor Evolution)
+          const defaultWebhookUrl = data.webhookUrl || data.webhook;
+
           const dbInstance = await prisma.evolutionInstance.create({
             data: {
               userId: userId,
@@ -539,37 +491,10 @@ export class EvolutionInstanceController {
               connectionState: "DISCONNECTED",
               status: "active",
               serverUrl: serverUrl,
-              webhookUrl: data.webhookUrl || data.webhook || "",
-              webhookByEvents:
-                data.webhookByEvents !== undefined
-                  ? data.webhookByEvents
-                  : true,
-              webhookBase64:
-                data.webhookBase64 !== undefined ? data.webhookBase64 : false,
-              webhookEvents: data.webhookEvents || [
-                "APPLICATION_STARTUP",
-                "QRCODE_UPDATED",
-                "CONNECTION_UPDATE",
-                "STATUS_INSTANCE",
-                "MESSAGES_UPSERT",
-                "MESSAGES_UPDATE",
-                "MESSAGES_DELETE",
-                "SEND_MESSAGE",
-                "CONTACTS_SET",
-                "CONTACTS_UPSERT",
-                "CONTACTS_UPDATE",
-                "PRESENCE_UPDATE",
-                "CHATS_SET",
-                "CHATS_UPSERT",
-                "CHATS_UPDATE",
-                "CHATS_DELETE",
-                "GROUPS_UPSERT",
-                "GROUP_UPDATE",
-                "GROUP_PARTICIPANTS_UPDATE",
-                "NEW_JWT_TOKEN",
-                "TYPEBOT_START",
-                "TYPEBOT_CHANGE_STATUS",
-              ],
+              webhookUrl: defaultWebhookUrl,
+              webhookByEvents: false, // Sempre desativado para não criar rotas por evento
+              webhookBase64: true, // Sempre ativado para receber dados em base64
+              webhookEvents: ["MESSAGES_UPSERT"], // Apenas mensagens
               isDefault: data.isDefault || false,
               sendConnectionStatus:
                 data.sendConnectionStatus !== undefined
@@ -723,7 +648,7 @@ export class EvolutionInstanceController {
   async connectInstance(request: FastifyRequest, reply: FastifyReply) {
     console.log("🚀 [CONNECT] Iniciando conectInstance");
     console.log("📋 [CONNECT] Params:", request.params);
-    
+
     // TESTE SIMPLES - retornar resposta mock primeiro
     console.log("🧪 [CONNECT] Retornando resposta de teste");
     const testResponse = {
@@ -733,14 +658,17 @@ export class EvolutionInstanceController {
         base64: "test-qr-code-base64",
         code: "test-qr-code",
         count: 1,
-        pairingCode: null
+        pairingCode: null,
       },
       instanceId: "test-instance-id",
-      instanceName: "test-instance"
+      instanceName: "test-instance",
     };
-    
-    console.log("✅ [CONNECT] Enviando resposta de teste:", JSON.stringify(testResponse, null, 2));
-    
+
+    console.log(
+      "✅ [CONNECT] Enviando resposta de teste:",
+      JSON.stringify(testResponse, null, 2)
+    );
+
     // Tentar forma mais simples de enviar resposta
     console.log("📤 [CONNECT] Tentando enviar resposta...");
     return reply.code(200).send(testResponse);
@@ -786,7 +714,10 @@ export class EvolutionInstanceController {
     const evolutionUrl = `${instance.serverUrl.replace(/\/$/, "")}/instance/connect/${instance.instanceName}`;
 
     console.log("🔗 [GENERATE QR] Chamando Evolution API:", evolutionUrl);
-    console.log("🔑 [GENERATE QR] API Key:", instance.apiKey ? "Presente" : "Ausente");
+    console.log(
+      "🔑 [GENERATE QR] API Key:",
+      instance.apiKey ? "Presente" : "Ausente"
+    );
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 segundos
@@ -818,11 +749,20 @@ export class EvolutionInstanceController {
       }
 
       const data = await response.json();
-      console.log("📋 [GENERATE QR] Dados recebidos:", JSON.stringify(data, null, 2));
-      
+      console.log(
+        "📋 [GENERATE QR] Dados recebidos:",
+        JSON.stringify(data, null, 2)
+      );
+
       // Log do QR Code gerado
-      console.log("🔲 [QR CODE] QR Code gerado para instância:", instance.instanceName);
-      console.log("📱 [QR CODE] Base64:", data.code || data.base64 || "Não disponível");
+      console.log(
+        "🔲 [QR CODE] QR Code gerado para instância:",
+        instance.instanceName
+      );
+      console.log(
+        "📱 [QR CODE] Base64:",
+        data.code || data.base64 || "Não disponível"
+      );
       if (data.pairingCode) {
         console.log("🔗 [QR CODE] Pairing Code:", data.pairingCode);
       }
@@ -834,14 +774,17 @@ export class EvolutionInstanceController {
         pairingCode: data.pairingCode,
       };
 
-      console.log("✅ [GENERATE QR] QR Code response preparada:", JSON.stringify(qrCodeResponse, null, 2));
-      
+      console.log(
+        "✅ [GENERATE QR] QR Code response preparada:",
+        JSON.stringify(qrCodeResponse, null, 2)
+      );
+
       // Verificar se o QR code tem conteúdo válido
       if (!qrCodeResponse.base64 && !qrCodeResponse.code) {
         console.log("❌ [GENERATE QR] QR Code sem conteúdo válido");
         return null;
       }
-      
+
       return qrCodeResponse;
     } catch (error) {
       clearTimeout(timeoutId);
@@ -1158,6 +1101,227 @@ export class EvolutionInstanceController {
       });
     } catch (error) {
       reply.code(500).send({
+        success: false,
+        message: "Erro interno do servidor",
+        error: error instanceof Error ? error.message : "Erro desconhecido",
+      });
+    }
+  }
+
+  // POST /evolution-instances/:id/refresh-status - Atualizar status da instância
+  async refreshInstanceStatus(request: FastifyRequest, reply: FastifyReply) {
+    try {
+      const { id } = request.params as { id: string };
+
+      console.log(
+        `🔄 [REFRESH STATUS] Iniciando atualização de status para ID: ${id}`
+      );
+
+      // Buscar instância no banco
+      const instance = await prisma.evolutionInstance.findUnique({
+        where: { id },
+      });
+
+      if (!instance) {
+        return reply.code(404).send({
+          success: false,
+          message: "Instância não encontrada",
+        });
+      }
+
+      if (!instance.serverUrl || !instance.apiKey) {
+        return reply.code(400).send({
+          success: false,
+          message:
+            "Instância não possui configurações válidas (serverUrl ou apiKey)",
+        });
+      }
+
+      try {
+        // Verificar status na Evolution API
+        const evolutionStatusUrl = `${instance.serverUrl.replace(/\/$/, "")}/instance/connectionState/${instance.instanceName}`;
+
+        console.log(
+          `🌐 [REFRESH STATUS] Consultando Evolution API: ${evolutionStatusUrl}`
+        );
+
+        const response = await fetch(evolutionStatusUrl, {
+          method: "GET",
+          headers: {
+            apikey: instance.apiKey,
+            "Content-Type": "application/json",
+          },
+          signal: AbortSignal.timeout(10000), // 10 segundos timeout
+        });
+
+        console.log(`📡 [REFRESH STATUS] Resposta Evolution API:`, {
+          status: response.status,
+          statusText: response.statusText,
+          ok: response.ok,
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.log(
+            `❌ [REFRESH STATUS] Erro na Evolution API: ${errorText}`
+          );
+
+          // Se instância não existe na Evolution API, marcar como DISCONNECTED
+          if (response.status === 404) {
+            await prisma.evolutionInstance.update({
+              where: { id: instance.id },
+              data: {
+                connectionState: "DISCONNECTED",
+                ownerJid: null,
+                profileName: null,
+                profilePictureUrl: null,
+                updatedAt: new Date(),
+              },
+            });
+
+            return reply.code(200).send({
+              success: true,
+              message:
+                "Status atualizado - instância não encontrada na Evolution API",
+              connectionState: "DISCONNECTED",
+              source: "evolution_api_not_found",
+            });
+          }
+
+          throw new Error(
+            `Evolution API error (${response.status}): ${errorText}`
+          );
+        }
+
+        const statusData = await response.json();
+        console.log(
+          `📋 [REFRESH STATUS] Dados recebidos:`,
+          JSON.stringify(statusData, null, 2)
+        );
+
+        // Mapear estado da Evolution API para nosso formato
+        let newConnectionState = "DISCONNECTED";
+        let ownerJid = instance.ownerJid;
+        let profileName = instance.profileName;
+        let profilePictureUrl = instance.profilePictureUrl;
+
+        if (statusData.instance) {
+          const evolutionState = statusData.instance.state;
+
+          switch (evolutionState) {
+            case "open":
+              newConnectionState = "CONNECTED";
+              break;
+            case "connecting":
+              newConnectionState = "CONNECTING";
+              break;
+            case "close":
+            case "closed":
+              newConnectionState = "DISCONNECTED";
+              break;
+            default:
+              newConnectionState = "DISCONNECTED";
+          }
+
+          // Se conectado, buscar informações do perfil
+          if (newConnectionState === "CONNECTED") {
+            try {
+              const profileUrl = `${instance.serverUrl.replace(/\/$/, "")}/instance/fetchInstances/${instance.instanceName}`;
+              const profileResponse = await fetch(profileUrl, {
+                method: "GET",
+                headers: {
+                  apikey: instance.apiKey,
+                  "Content-Type": "application/json",
+                },
+                signal: AbortSignal.timeout(5000),
+              });
+
+              if (profileResponse.ok) {
+                const profileData = await profileResponse.json();
+                console.log(
+                  `👤 [REFRESH STATUS] Dados do perfil:`,
+                  JSON.stringify(profileData, null, 2)
+                );
+
+                if (profileData.instance) {
+                  ownerJid = profileData.instance.ownerJid || ownerJid;
+                  profileName = profileData.instance.profileName || profileName;
+                  profilePictureUrl =
+                    profileData.instance.profilePictureUrl || profilePictureUrl;
+                }
+              }
+            } catch (profileError) {
+              console.warn(
+                `⚠️ [REFRESH STATUS] Erro ao buscar perfil:`,
+                profileError
+              );
+            }
+          }
+
+          // Se desconectado, limpar dados do perfil
+          if (newConnectionState === "DISCONNECTED") {
+            ownerJid = null;
+            profileName = null;
+            profilePictureUrl = null;
+          }
+        }
+
+        // Atualizar no banco de dados
+        const updatedInstance = await prisma.evolutionInstance.update({
+          where: { id: instance.id },
+          data: {
+            connectionState: newConnectionState,
+            ownerJid,
+            profileName,
+            profilePictureUrl,
+            updatedAt: new Date(),
+          },
+        });
+
+        console.log(`✅ [REFRESH STATUS] Status atualizado com sucesso:`, {
+          instanceName: instance.instanceName,
+          oldState: instance.connectionState,
+          newState: newConnectionState,
+          ownerJid,
+          profileName,
+        });
+
+        return reply.code(200).send({
+          success: true,
+          message: "Status da instância atualizado com sucesso",
+          connectionState: newConnectionState,
+          ownerJid,
+          profileName,
+          profilePictureUrl,
+          source: "evolution_api",
+          instance: {
+            id: updatedInstance.id,
+            instanceName: updatedInstance.instanceName,
+            connectionState: updatedInstance.connectionState,
+            ownerJid: updatedInstance.ownerJid,
+            profileName: updatedInstance.profileName,
+            profilePictureUrl: updatedInstance.profilePictureUrl,
+            updatedAt: updatedInstance.updatedAt,
+          },
+        });
+      } catch (evolutionError) {
+        console.error(
+          `💥 [REFRESH STATUS] Erro ao consultar Evolution API:`,
+          evolutionError
+        );
+
+        return reply.code(500).send({
+          success: false,
+          message: "Erro ao consultar status na Evolution API",
+          error:
+            evolutionError instanceof Error
+              ? evolutionError.message
+              : "Erro de conexão",
+        });
+      }
+    } catch (error) {
+      console.error(`💥 [REFRESH STATUS] Erro geral:`, error);
+      return reply.code(500).send({
         success: false,
         message: "Erro interno do servidor",
         error: error instanceof Error ? error.message : "Erro desconhecido",

@@ -792,6 +792,33 @@ export default async function (fastify: FastifyInstance) {
         const { id } = request.params as { id: string };
         const { instanceIds } = request.body as { instanceIds: string[] };
 
+        // Logs para debug
+        console.log("🔍 [ASSIGN-INSTANCES] Request data:", {
+          configIAId: id,
+          instanceIds,
+          bodyType: typeof request.body,
+          bodyContent: JSON.stringify(request.body)
+        });
+
+        // Validar dados de entrada
+        if (!id || typeof id !== 'string') {
+          return reply.code(400).send(
+            formatResponse({
+              success: false,
+              message: "ID da configuração de IA é obrigatório",
+            })
+          );
+        }
+
+        if (!instanceIds || !Array.isArray(instanceIds) || instanceIds.length === 0) {
+          return reply.code(400).send(
+            formatResponse({
+              success: false,
+              message: "Lista de IDs de instâncias é obrigatória e não pode estar vazia",
+            })
+          );
+        }
+
         // Verificar se a ConfigIA existe
         const configIA = await db.configIA.findUnique({
           where: { id },
@@ -881,11 +908,19 @@ export default async function (fastify: FastifyInstance) {
           message: `${instanceIds.length} instâncias atribuídas com sucesso`,
         });
       } catch (error) {
+        console.error("💥 [ASSIGN-INSTANCES] Error details:", {
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+          configIAId: request.params,
+          requestBody: request.body
+        });
+
         logError("Error assigning instances to ConfigIA", error as Error);
         return reply.code(500).send(
           formatResponse({
             success: false,
             message: "Erro interno do servidor",
+            error: error instanceof Error ? error.message : "Erro desconhecido",
           })
         );
       }
@@ -1013,6 +1048,33 @@ export default async function (fastify: FastifyInstance) {
         const { id } = request.params as { id: string };
         const { instanceIds } = request.body as { instanceIds: string[] };
 
+        // Logs para debug
+        console.log("🔍 [UNASSIGN-INSTANCES] Request data:", {
+          configIAId: id,
+          instanceIds,
+          bodyType: typeof request.body,
+          bodyContent: JSON.stringify(request.body)
+        });
+
+        // Validar dados de entrada
+        if (!id || typeof id !== 'string') {
+          return reply.code(400).send(
+            formatResponse({
+              success: false,
+              message: "ID da configuração de IA é obrigatório",
+            })
+          );
+        }
+
+        if (!instanceIds || !Array.isArray(instanceIds) || instanceIds.length === 0) {
+          return reply.code(400).send(
+            formatResponse({
+              success: false,
+              message: "Lista de IDs de instâncias é obrigatória e não pode estar vazia",
+            })
+          );
+        }
+
         // Verificar se a ConfigIA existe
         const configIA = await db.configIA.findUnique({
           where: { id },
@@ -1072,6 +1134,13 @@ export default async function (fastify: FastifyInstance) {
           data: instances,
         });
       } catch (error) {
+        console.error("💥 [UNASSIGN-INSTANCES] Error details:", {
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+          configIAId: request.params,
+          requestBody: request.body
+        });
+
         logError(
           "Error unassigning multiple instances from ConfigIA",
           error as Error
@@ -1080,6 +1149,7 @@ export default async function (fastify: FastifyInstance) {
           formatResponse({
             success: false,
             message: "Erro interno do servidor",
+            error: error instanceof Error ? error.message : "Erro desconhecido",
           })
         );
       }

@@ -158,4 +158,5 @@ export default async function evolutionInstanceRoutes(
   // Outras rotas Evolution API
   fastify.post("/:id/disconnect", controller.disconnectInstance.bind(controller));
   fastify.get("/:id/status", controller.getInstanceStatus.bind(controller));
+  fastify.post("/:id/refresh-status", controller.refreshInstanceStatus.bind(controller));
 }

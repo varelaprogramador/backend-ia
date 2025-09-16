@@ -282,6 +282,7 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
     "554391885778", // +55 43 9188-5778
     "554384778544", // +55 43 8477-8544
     "553484443047",
+    "554399140409",
   ];
 
   const normalizedPhoneNumber = phoneNumber.replace(/[^\d]/g, "");
@@ -320,6 +321,20 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
     });
     return null;
   }
+
+  // Log configs for debugging webhook URL issues
+  logInfo("Webhook configs loaded", {
+    configIAId: configs.configIAId,
+    hasWebhookUrlProd: !!configs.webhookUrlProd,
+    hasWebhookUrlDev: !!configs.webhookUrlDev,
+    webhookUrlProdPreview: configs.webhookUrlProd
+      ? configs.webhookUrlProd.substring(0, 50) + "..."
+      : "NOT_SET",
+    webhookUrlDevPreview: configs.webhookUrlDev
+      ? configs.webhookUrlDev.substring(0, 50) + "..."
+      : "NOT_SET",
+    nodeEnv: ENV.NODE_ENV,
+  });
 
   // Check if the number is deactivated for a specific agent
   if (configs.configIAId) {
@@ -523,7 +538,9 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
 
     // Send to N8N webhook if configured and not from me and ConfigIA is active
     // Note: Messages from deactivated numbers are already filtered out earlier in the processWebhook function
-    if (ENV.N8N_WEBHOOK_URL && !key.fromMe) {
+    const webhookUrl = getWebhookUrl(configs);
+
+    if (webhookUrl && !key.fromMe) {
       // Check if ConfigIA is active before sending to N8N
       const isConfigIAActive =
         configs.configIAId &&
@@ -531,17 +548,25 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
 
       if (isConfigIAActive) {
         try {
-          await sendToN8N(savedMessage, webhook);
+          await sendToN8N(savedMessage, webhook, webhookUrl);
         } catch (error) {
           logError("Failed to send message to N8N webhook", error as Error);
         }
       } else {
         logInfo("ConfigIA is inactive, skipping N8N webhook", {
           configIAId: configs.configIAId,
-          configIAStatus: isConfigIAActive ? "ativo" : "inativo",
+          configIAStatus: configs.configIAStatus || "unknown",
           messageId: key.id,
         });
       }
+    } else if (!webhookUrl) {
+      logInfo("No webhook URL configured, skipping N8N webhook", {
+        configIAId: configs.configIAId,
+        messageId: key.id,
+        hasEnvUrl: !!ENV.N8N_WEBHOOK_URL,
+        hasProdUrl: !!configs.webhookUrlProd,
+        hasDevUrl: !!configs.webhookUrlDev,
+      });
     }
 
     return savedMessage;
@@ -551,7 +576,7 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
   }
 }
 
-// Function to check if ConfigIA is active
+// Function to check if ConfigIA should process webhooks (not inactive)
 async function isConfigIAActiveStatus(configIAId: string): Promise<boolean> {
   try {
     const configIA = await db.configIA.findUnique({
@@ -559,11 +584,91 @@ async function isConfigIAActiveStatus(configIAId: string): Promise<boolean> {
       select: { status: true },
     });
 
-    return configIA?.status === "ativo";
+    // Only inactive status should block webhook processing
+    return configIA?.status !== "inativo";
   } catch (error) {
     logError("Error checking ConfigIA status", error as Error);
     return false; // Default to inactive if error
   }
+}
+
+// Function to determine which webhook URL to use based on ConfigIA status
+function getWebhookUrl(configs: any): string | null {
+  // Priority based on ConfigIA status:
+  // 1. "ativo" -> use webhookUrlProd
+  // 2. "em desenvolvimento" -> use webhookUrlDev
+  // 3. "inativo" -> return null (no webhook processing)
+  // 4. Fall back to ENV.N8N_WEBHOOK_URL if no ConfigIA-specific URL
+
+  const configIAStatus = configs.configIAStatus;
+
+  logInfo("Determining webhook URL based on ConfigIA status", {
+    configIAStatus,
+    configIAId: configs.configIAId,
+    hasWebhookUrlProd: !!configs.webhookUrlProd,
+    hasWebhookUrlDev: !!configs.webhookUrlDev,
+    hasEnvWebhookUrl: !!ENV.N8N_WEBHOOK_URL,
+  });
+
+  // If ConfigIA is inactive, don't process webhook
+  if (configIAStatus === "inativo") {
+    logInfo("ConfigIA is inactive, skipping webhook processing", {
+      configIAId: configs.configIAId,
+      status: configIAStatus,
+    });
+    return null;
+  }
+
+  // If ConfigIA is active, use production webhook URL
+  if (configIAStatus === "ativo" && configs.webhookUrlProd) {
+    logInfo("Using production webhook URL (ConfigIA status: ativo)", {
+      url: configs.webhookUrlProd.substring(0, 50) + "...",
+      configIAId: configs.configIAId,
+    });
+    return configs.webhookUrlProd;
+  }
+
+  // If ConfigIA is in development, use development webhook URL
+  if (configIAStatus === "em desenvolvimento" && configs.webhookUrlDev) {
+    logInfo("Using development webhook URL (ConfigIA status: em desenvolvimento)", {
+      url: configs.webhookUrlDev.substring(0, 50) + "...",
+      configIAId: configs.configIAId,
+    });
+    return configs.webhookUrlDev;
+  }
+
+  // Fallback: if active but no prod URL, try dev URL
+  if (configIAStatus === "ativo" && configs.webhookUrlDev) {
+    logInfo("Using development webhook URL as fallback for active ConfigIA", {
+      url: configs.webhookUrlDev.substring(0, 50) + "...",
+      configIAId: configs.configIAId,
+    });
+    return configs.webhookUrlDev;
+  }
+
+  // Fallback: if in development but no dev URL, try prod URL
+  if (configIAStatus === "em desenvolvimento" && configs.webhookUrlProd) {
+    logInfo("Using production webhook URL as fallback for development ConfigIA", {
+      url: configs.webhookUrlProd.substring(0, 50) + "...",
+      configIAId: configs.configIAId,
+    });
+    return configs.webhookUrlProd;
+  }
+
+  // Ultimate fallback to environment variable (only if ConfigIA is not inactive)
+  if (configIAStatus !== "inativo" && ENV.N8N_WEBHOOK_URL) {
+    logInfo("Using fallback webhook URL from environment", {
+      url: ENV.N8N_WEBHOOK_URL.substring(0, 50) + "...",
+      status: configIAStatus,
+    });
+    return ENV.N8N_WEBHOOK_URL;
+  }
+
+  logInfo("No suitable webhook URL found", {
+    configIAStatus,
+    configIAId: configs.configIAId,
+  });
+  return null;
 }
 
 // Function to create configs object for webhook identification
@@ -579,6 +684,9 @@ async function createConfigsObject(
   configIAId?: string;
   userId?: string;
   aiPrompt?: string;
+  webhookUrlProd?: string;
+  webhookUrlDev?: string;
+  configIAStatus?: string;
 }> {
   try {
     logInfo("Creating configs object for webhook identification", {
@@ -593,7 +701,16 @@ async function createConfigsObject(
         serverUrl: serverUrl,
       },
       include: {
-        configIA: true,
+        configIA: {
+          select: {
+            id: true,
+            nome: true,
+            prompt: true,
+            status: true,
+            webhookUrlProd: true,
+            webhookUrlDev: true,
+          },
+        },
         user: true,
       },
     });
@@ -603,7 +720,6 @@ async function createConfigsObject(
       serverUrl: serverUrl,
       apikey: apikey,
     };
-
     if (evolutionInstance) {
       logInfo("Evolution instance found in database", {
         instanceId: evolutionInstance.id,
@@ -613,6 +729,17 @@ async function createConfigsObject(
         aiPrompt: evolutionInstance.configIA?.prompt
           ? "Present"
           : "Not present",
+        webhookUrlProd:
+          evolutionInstance.configIA?.webhookUrlProd || "NULL/EMPTY",
+        webhookUrlDev:
+          evolutionInstance.configIA?.webhookUrlDev || "NULL/EMPTY",
+        configIAData: evolutionInstance.configIA
+          ? {
+              id: evolutionInstance.configIA.id,
+              webhookUrlProd: evolutionInstance.configIA.webhookUrlProd,
+              webhookUrlDev: evolutionInstance.configIA.webhookUrlDev,
+            }
+          : "NO_CONFIG_IA",
       });
 
       return {
@@ -621,6 +748,9 @@ async function createConfigsObject(
         configIAId: evolutionInstance.configIAId || undefined,
         userId: evolutionInstance.userId,
         aiPrompt: evolutionInstance.configIA?.prompt || undefined,
+        webhookUrlProd: evolutionInstance.configIA?.webhookUrlProd || undefined,
+        webhookUrlDev: evolutionInstance.configIA?.webhookUrlDev || undefined,
+        configIAStatus: evolutionInstance.configIA?.status || undefined,
       };
     } else {
       logInfo("Evolution instance not found in database", {
@@ -803,7 +933,8 @@ async function getMediaBase64(
 // Function to send message data to N8N webhook
 async function sendToN8N(
   savedMessage: any,
-  originalWebhook: EvolutionWebhookBody
+  originalWebhook: EvolutionWebhookBody,
+  webhookUrl: string
 ): Promise<void> {
   try {
     const n8nPayload = {
@@ -853,13 +984,13 @@ async function sendToN8N(
     };
 
     logInfo("Sending message to N8N webhook", {
-      n8nUrl: ENV.N8N_WEBHOOK_URL?.substring(0, 50) + "...",
+      n8nUrl: webhookUrl.substring(0, 50) + "...",
       messageId: savedMessage.messageId,
       messageType: savedMessage.messageType,
       hasMedia: !!savedMessage.mediaBase64,
     });
 
-    const response = await axios.post(ENV.N8N_WEBHOOK_URL!, n8nPayload, {
+    const response = await axios.post(webhookUrl, n8nPayload, {
       timeout: 10000, // 10 seconds timeout
       headers: {
         "Content-Type": "application/json",
@@ -876,7 +1007,7 @@ async function sendToN8N(
     logError("Failed to send message to N8N webhook", {
       error: error instanceof Error ? error.message : "Unknown error",
       messageId: savedMessage.messageId,
-      n8nUrl: ENV.N8N_WEBHOOK_URL?.substring(0, 50) + "...",
+      n8nUrl: webhookUrl.substring(0, 50) + "...",
     });
     throw error;
   }
