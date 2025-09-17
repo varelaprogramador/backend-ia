@@ -539,7 +539,23 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
         try {
           await sendToN8N(savedMessage, webhook, webhookUrl);
         } catch (error) {
-          logError("Failed to send message to N8N webhook", error as Error);
+          logError("Failed to send message to N8N webhook", {
+            error: error instanceof Error ? error.message : "Unknown error",
+            stack: error instanceof Error ? error.stack : undefined,
+            webhookUrl: webhookUrl.substring(0, 50) + "...",
+            messageId: key.id,
+            configIAId: configs.configIAId,
+            configIAStatus: configs.configIAStatus,
+            messageType: messageType,
+            chatId: chatId,
+            senderId: senderId,
+            httpStatus: error instanceof Error && 'response' in error
+              ? (error as any).response?.status
+              : undefined,
+            httpStatusText: error instanceof Error && 'response' in error
+              ? (error as any).response?.statusText
+              : undefined,
+          });
         }
       } else {
         logInfo("ConfigIA is inactive, skipping N8N webhook", {
@@ -555,6 +571,8 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
         hasEnvUrl: !!ENV.N8N_WEBHOOK_URL,
         hasProdUrl: !!configs.webhookUrlProd,
         hasDevUrl: !!configs.webhookUrlDev,
+        configIAStatus: configs.configIAStatus,
+        reason: !webhookUrl ? "no_webhook_url" : "message_from_me",
       });
     }
 
@@ -664,7 +682,7 @@ function getWebhookUrl(configs: any): string | null {
 async function createConfigsObject(
   instanceName: string,
   serverUrl: string,
-  apikey: string
+  webhookApikey: string
 ): Promise<{
   evolutionInstance: string;
   serverUrl: string;
@@ -704,11 +722,15 @@ async function createConfigsObject(
       },
     });
 
+    // Use apiKey from database if available, fallback to webhook apikey
+    const apikey = evolutionInstance?.apiKey || webhookApikey;
+
     const configs = {
       evolutionInstance: instanceName,
       serverUrl: serverUrl,
       apikey: apikey,
     };
+
     if (evolutionInstance) {
       logInfo("Evolution instance found in database", {
         instanceId: evolutionInstance.id,
@@ -729,6 +751,7 @@ async function createConfigsObject(
               webhookUrlDev: evolutionInstance.configIA.webhookUrlDev,
             }
           : "NO_CONFIG_IA",
+        apiKeySource: evolutionInstance.apiKey ? "database" : "webhook",
       });
 
       return {
@@ -745,6 +768,7 @@ async function createConfigsObject(
       logInfo("Evolution instance not found in database", {
         instanceName,
         serverUrl: serverUrl?.substring(0, 50) + "...",
+        apiKeySource: "webhook_fallback",
       });
 
       return configs;
@@ -754,7 +778,7 @@ async function createConfigsObject(
     return {
       evolutionInstance: instanceName,
       serverUrl: serverUrl,
-      apikey: apikey,
+      apikey: webhookApikey,
     };
   }
 }
@@ -977,26 +1001,63 @@ async function sendToN8N(
       messageId: savedMessage.messageId,
       messageType: savedMessage.messageType,
       hasMedia: !!savedMessage.mediaBase64,
+      payloadSize: `${Math.round(JSON.stringify(n8nPayload).length / 1024)}KB`,
     });
 
     const response = await axios.post(webhookUrl, n8nPayload, {
-      timeout: 10000, // 10 seconds timeout
+      timeout: 15000, // 15 seconds timeout (increased)
       headers: {
         "Content-Type": "application/json",
         "User-Agent": "Evolution-Webhook-Forwarder/1.0",
       },
+      validateStatus: (status) => {
+        // Accept any status code less than 500 as valid
+        return status < 500;
+      },
     });
 
-    logInfo("Message successfully sent to N8N", {
-      messageId: savedMessage.messageId,
-      responseStatus: response.status,
-      responseData: response.data,
-    });
+    if (response.status >= 200 && response.status < 300) {
+      logInfo("Message successfully sent to N8N", {
+        messageId: savedMessage.messageId,
+        responseStatus: response.status,
+        responseData: typeof response.data === 'object'
+          ? JSON.stringify(response.data).substring(0, 200) + "..."
+          : response.data?.toString().substring(0, 200) + "...",
+      });
+    } else {
+      logError("N8N webhook returned non-success status", {
+        messageId: savedMessage.messageId,
+        responseStatus: response.status,
+        responseStatusText: response.statusText,
+        responseData: typeof response.data === 'object'
+          ? JSON.stringify(response.data)
+          : response.data,
+        webhookUrl: webhookUrl.substring(0, 50) + "...",
+      });
+      throw new Error(`N8N webhook returned status ${response.status}: ${response.statusText}`);
+    }
   } catch (error) {
+    const isAxiosError = error && typeof error === 'object' && 'isAxiosError' in error;
+
     logError("Failed to send message to N8N webhook", {
       error: error instanceof Error ? error.message : "Unknown error",
+      stack: error instanceof Error ? error.stack?.split('\n').slice(0, 5).join('\n') : undefined,
       messageId: savedMessage.messageId,
-      n8nUrl: webhookUrl.substring(0, 50) + "...",
+      webhookUrl: webhookUrl.substring(0, 50) + "...",
+      isAxiosError,
+      httpStatus: isAxiosError ? (error as any).response?.status : undefined,
+      httpStatusText: isAxiosError ? (error as any).response?.statusText : undefined,
+      httpResponseData: isAxiosError && (error as any).response?.data
+        ? typeof (error as any).response.data === 'object'
+          ? JSON.stringify((error as any).response.data)
+          : (error as any).response.data
+        : undefined,
+      requestConfig: isAxiosError ? {
+        url: (error as any).config?.url?.substring(0, 50) + "...",
+        method: (error as any).config?.method,
+        timeout: (error as any).config?.timeout,
+      } : undefined,
+      errorCode: isAxiosError ? (error as any).code : undefined,
     });
     throw error;
   }
