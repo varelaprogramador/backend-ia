@@ -11,6 +11,10 @@ const configIASchema = z.object({
   status: z.string().optional(),
   webhookUrlProd: z.string().url().optional().or(z.literal("")),
   webhookUrlDev: z.string().url().optional().or(z.literal("")),
+  // Campos de integração com Kommo
+  kommoSubdomain: z.string().optional().or(z.literal("")),
+  kommoAccessToken: z.string().optional().or(z.literal("")),
+  kommodPipelineId: z.string().optional().or(z.literal("")),
 });
 
 const updateConfigIASchema = configIASchema.partial().omit({ userId: true });
@@ -229,12 +233,58 @@ export default async function (fastify: FastifyInstance) {
 
         const configs = await db.configIA.findMany({
           where: { userId: userId },
+          include: {
+            evolutionInstances: {
+              select: {
+                id: true,
+                instanceName: true,
+                displayName: true,
+                connectionState: true,
+                status: true,
+              },
+            },
+          },
           orderBy: { createdAt: "desc" },
         });
 
+        // Calcular métricas para cada config
+        const configsWithMetrics = await Promise.all(
+          configs.map(async (config) => {
+            // Pegar instanceNames vinculados a este config
+            const instanceNames = config.evolutionInstances.map(i => i.instanceName);
+
+            // Contar mensagens do n8nChatMemory
+            const n8nMessageCount = instanceNames.length > 0
+              ? await db.n8nChatMemory.count({
+                  where: {
+                    instanceName: { in: instanceNames },
+                  },
+                })
+              : 0;
+
+            // Contar mensagens do MyMessages
+            const myMessageCount = instanceNames.length > 0
+              ? await db.myMessages.count({
+                  where: {
+                    instanceName: { in: instanceNames },
+                  },
+                })
+              : 0;
+
+            // Total de mensagens
+            const totalMessages = n8nMessageCount + myMessageCount;
+
+            return {
+              ...config,
+              totalMessages,
+              confirmedAppointments: 0, // Será implementado posteriormente
+            };
+          })
+        );
+
         return formatResponse({
-          data: configs,
-          metadata: { userId, count: configs.length },
+          data: configsWithMetrics,
+          metadata: { userId, count: configsWithMetrics.length },
         });
       } catch (error) {
         logError("Error getting AI configurations by user", error as Error);
@@ -264,6 +314,9 @@ export default async function (fastify: FastifyInstance) {
             status: { type: "string" },
             webhookUrlProd: { type: "string" },
             webhookUrlDev: { type: "string" },
+            kommoSubdomain: { type: "string" },
+            kommoAccessToken: { type: "string" },
+            kommodPipelineId: { type: "string" },
           },
           required: ["userId", "nome", "prompt"],
         },
@@ -288,11 +341,14 @@ export default async function (fastify: FastifyInstance) {
           );
         }
 
-        // Convert empty strings to null for URL fields
+        // Convert empty strings to null for URL fields and Kommo fields
         const dataToCreate = {
           ...validatedData,
           webhookUrlProd: validatedData.webhookUrlProd || null,
           webhookUrlDev: validatedData.webhookUrlDev || null,
+          kommoSubdomain: validatedData.kommoSubdomain || null,
+          kommoAccessToken: validatedData.kommoAccessToken || null,
+          kommodPipelineId: validatedData.kommodPipelineId || null,
         };
 
         const config = await db.configIA.create({
@@ -316,12 +372,14 @@ export default async function (fastify: FastifyInstance) {
           nome: config.nome,
         });
 
-        return reply.code(201).send(
-          formatResponse({
-            data: config,
-            message: "Configuração de IA criada com sucesso",
-          })
-        );
+        const response = formatResponse({
+          data: config,
+          message: "Configuração de IA criada com sucesso",
+        });
+
+        console.log("📤 [CREATE CONFIG] Response data:", JSON.stringify(response, null, 2));
+
+        return reply.code(201).send(response);
       } catch (error: any) {
         logError("Error creating AI configuration", error as Error);
         return reply.code(500).send(
@@ -356,6 +414,9 @@ export default async function (fastify: FastifyInstance) {
             status: { type: "string" },
             webhookUrlProd: { type: "string" },
             webhookUrlDev: { type: "string" },
+            kommoSubdomain: { type: "string" },
+            kommoAccessToken: { type: "string" },
+            kommodPipelineId: { type: "string" },
           },
         },
       },
@@ -365,13 +426,22 @@ export default async function (fastify: FastifyInstance) {
         const { id } = request.params as { id: string };
         const validatedData = updateConfigIASchema.parse(request.body);
 
-        // Convert empty strings to null for URL fields
+        // Convert empty strings to null for URL fields and Kommo fields
         const dataToUpdate: any = { ...validatedData };
         if ("webhookUrlProd" in dataToUpdate) {
           dataToUpdate.webhookUrlProd = dataToUpdate.webhookUrlProd || null;
         }
         if ("webhookUrlDev" in dataToUpdate) {
           dataToUpdate.webhookUrlDev = dataToUpdate.webhookUrlDev || null;
+        }
+        if ("kommoSubdomain" in dataToUpdate) {
+          dataToUpdate.kommoSubdomain = dataToUpdate.kommoSubdomain || null;
+        }
+        if ("kommoAccessToken" in dataToUpdate) {
+          dataToUpdate.kommoAccessToken = dataToUpdate.kommoAccessToken || null;
+        }
+        if ("kommodPipelineId" in dataToUpdate) {
+          dataToUpdate.kommodPipelineId = dataToUpdate.kommodPipelineId || null;
         }
 
         const config = await db.configIA.update({
@@ -654,6 +724,9 @@ export default async function (fastify: FastifyInstance) {
             status: "inativo", // Clone starts as inactive
             webhookUrlProd: originalConfig.webhookUrlProd,
             webhookUrlDev: originalConfig.webhookUrlDev,
+            kommoSubdomain: originalConfig.kommoSubdomain,
+            kommoAccessToken: originalConfig.kommoAccessToken,
+            kommodPipelineId: originalConfig.kommodPipelineId,
           },
           include: {
             user: {

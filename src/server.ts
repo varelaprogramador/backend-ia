@@ -220,59 +220,6 @@ const ALLOW_EMPTY_BODY_PATHS = new Set([
 ]);
 const WRITE_METHODS = new Set(["POST", "PUT", "PATCH"]);
 
-// Lightweight performance tracking (only for slow requests)
-app.addHook("onRequest", async (request) => {
-  (request as any).startTime = Date.now();
-
-  // Handle connection errors at request level
-  request.raw.on("error", (error) => {
-    if (
-      !error.message.includes("premature close") &&
-      !error.message.includes("ECONNRESET") &&
-      !error.message.includes("EPIPE")
-    ) {
-      logError("Request stream error", error);
-    }
-    // Suppress premature close errors completely
-  });
-
-  request.raw.on("close", () => {
-    // Don't log close events as they're normal behavior
-  });
-
-  request.raw.on("aborted", () => {
-    // Don't log aborted events as they're normal behavior
-  });
-});
-
-app.addHook("onResponse", async (request, reply) => {
-  // Only track slow requests (>2s) to reduce overhead
-  const responseTime = Date.now() - ((request as any).startTime || 0);
-  if (responseTime > 2000) {
-    logWarn("Slow request detected", {
-      method: request.method,
-      url: request.url,
-      responseTime: `${responseTime}ms`,
-      statusCode: reply.statusCode,
-    });
-  }
-});
-
-// Add onSend hook to handle premature close during response sending
-app.addHook("onSend", async (request, reply, payload) => {
-  // Check if connection is still active before sending
-  if (request.raw.destroyed || request.raw.readableEnded) {
-    // Don't log - this is expected behavior for disconnected clients
-    // Check if response was already sent to prevent header errors
-    if (reply.sent) {
-      return payload;
-    }
-    return "";
-  }
-
-  return payload;
-});
-
 // Configuração do Socket.IO
 const io = new SocketServer(app.server, {
   cors: {

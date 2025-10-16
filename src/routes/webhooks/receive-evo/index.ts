@@ -84,6 +84,13 @@ interface EvolutionWebhookBody {
     configIAId?: string;
     userId?: string;
     aiPrompt?: string;
+    webhookUrlProd?: string;
+    webhookUrlDev?: string;
+    configIAStatus?: string;
+    // Campos de integração com Kommo
+    kommoSubdomain?: string;
+    kommoAccessToken?: string;
+    kommodPipelineId?: string;
   };
 }
 
@@ -270,11 +277,33 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
   // Determine if it's a group message
   const isGroup = key.remoteJid.includes("@g.us");
   const chatId = key.remoteJid;
-  const senderId = isGroup ? key.participant : key.remoteJid;
+
+  // Determine senderId based on message direction
+  // If fromMe=true, senderId should be MY number, not the recipient's
+  let senderId: string;
+  if (key.fromMe) {
+    // Message sent by me - use my phone number or the instance number
+    senderId = ENV.MY_PHONE_NUMBER || key.remoteJid; // Fallback to remoteJid if MY_PHONE_NUMBER not set
+  } else {
+    // Message received from someone else
+    senderId = isGroup ? key.participant || key.remoteJid : key.remoteJid;
+  }
+
   const senderName = pushName || extractPhoneNumber(senderId || "");
 
   // Check if the contact is blocked
   const phoneNumber = extractPhoneNumber(key.remoteJid);
+
+  // Log message routing information for debugging
+  logInfo("Message routing information", {
+    fromMe: key.fromMe,
+    chatId: chatId,
+    senderId: senderId,
+    phoneNumber: phoneNumber,
+    isGroup: isGroup,
+    messageId: key.id,
+    willSaveTo: key.fromMe || (ENV.MY_PHONE_NUMBER && phoneNumber === ENV.MY_PHONE_NUMBER) ? "MyMessages" : "n8nChatMemory",
+  });
 
   // TESTING MODE: Only allow these specific numbers
   const allowedNumbers = [
@@ -423,12 +452,16 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
       webhook.sessionId ||
       `${chatId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-    // Check if this message is from you (my phone number)
+    // Check if this message is from you (my phone number OR fromMe flag from Evolution API)
     const isMyMessage =
-      ENV.MY_PHONE_NUMBER && phoneNumber === ENV.MY_PHONE_NUMBER;
+      (ENV.MY_PHONE_NUMBER && phoneNumber === ENV.MY_PHONE_NUMBER) ||
+      key.fromMe === true;
 
     if (isMyMessage) {
       // Save your message to MyMessages table
+      // IMPORTANT: chatId is the recipient's number (person you're talking to)
+      //            senderId is YOUR number (ENV.MY_PHONE_NUMBER)
+      //            This ensures your messages are grouped with the same chat as the recipient's messages
       const myMessage = await db.myMessages.create({
         data: {
           sessionId: sessionId,
@@ -438,8 +471,8 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
           // Evolution API fields
           messageId: key?.id || null,
           instanceName: instance || null,
-          chatId: chatId || null,
-          senderId: senderId || null,
+          chatId: chatId || null, // Recipient's number (person A)
+          senderId: senderId || null, // Your number (from ENV.MY_PHONE_NUMBER)
           senderName: senderName || null,
           messageType: messageType || null,
           content: messageContent.text || undefined,
@@ -463,14 +496,16 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
         },
       });
 
-      logInfo("Your message saved to MyMessages table", {
+      logInfo("Your message saved to MyMessages table (not sent to N8N)", {
         messageId: key.id,
         messageType,
         phoneNumber,
+        fromMe: key.fromMe,
+        matchedBy: key.fromMe ? "fromMe flag" : "phone number",
         content: messageContent.text?.substring(0, 100),
       });
 
-      return myMessage;
+      return myMessage; // Early return - skip N8N and n8nChatMemory
     }
 
     // Save message to database (for other users)
@@ -527,6 +562,7 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
 
     // Send to N8N webhook if configured and not from me and ConfigIA is active
     // Note: Messages from deactivated numbers are already filtered out earlier in the processWebhook function
+    // Note: Messages with key.fromMe === true are already filtered out earlier (line 438-483)
     const webhookUrl = getWebhookUrl(configs);
 
     if (webhookUrl && !key.fromMe) {
@@ -694,6 +730,10 @@ async function createConfigsObject(
   webhookUrlProd?: string;
   webhookUrlDev?: string;
   configIAStatus?: string;
+  // Campos de integração com Kommo
+  kommoSubdomain?: string;
+  kommoAccessToken?: string;
+  kommodPipelineId?: string;
 }> {
   try {
     logInfo("Creating configs object for webhook identification", {
@@ -716,6 +756,10 @@ async function createConfigsObject(
             status: true,
             webhookUrlProd: true,
             webhookUrlDev: true,
+            // Campos de integração com Kommo
+            kommoSubdomain: true,
+            kommoAccessToken: true,
+            kommodPipelineId: true,
           },
         },
         user: true,
@@ -744,6 +788,13 @@ async function createConfigsObject(
           evolutionInstance.configIA?.webhookUrlProd || "NULL/EMPTY",
         webhookUrlDev:
           evolutionInstance.configIA?.webhookUrlDev || "NULL/EMPTY",
+        kommoIntegration: evolutionInstance.configIA?.kommoSubdomain
+          ? {
+              subdomain: evolutionInstance.configIA.kommoSubdomain,
+              hasAccessToken: !!evolutionInstance.configIA.kommoAccessToken,
+              pipelineId: evolutionInstance.configIA.kommodPipelineId || "NULL/EMPTY",
+            }
+          : "NOT_CONFIGURED",
         configIAData: evolutionInstance.configIA
           ? {
               id: evolutionInstance.configIA.id,
@@ -763,6 +814,10 @@ async function createConfigsObject(
         webhookUrlProd: evolutionInstance.configIA?.webhookUrlProd || undefined,
         webhookUrlDev: evolutionInstance.configIA?.webhookUrlDev || undefined,
         configIAStatus: evolutionInstance.configIA?.status || undefined,
+        // Campos de integração com Kommo
+        kommoSubdomain: evolutionInstance.configIA?.kommoSubdomain || undefined,
+        kommoAccessToken: evolutionInstance.configIA?.kommoAccessToken || undefined,
+        kommodPipelineId: evolutionInstance.configIA?.kommodPipelineId || undefined,
       };
     } else {
       logInfo("Evolution instance not found in database", {
@@ -986,6 +1041,13 @@ async function sendToN8N(
         system_message: savedMessage.system_message,
       },
 
+      // Kommo integration data (when available)
+      kommoIntegration: originalWebhook.configs?.kommoSubdomain ? {
+        subdomain: originalWebhook.configs.kommoSubdomain,
+        accessToken: originalWebhook.configs.kommoAccessToken,
+        pipelineId: originalWebhook.configs.kommodPipelineId,
+      } : null,
+
       // Processing metadata
       processingInfo: {
         processedAt: new Date().toISOString(),
@@ -993,6 +1055,7 @@ async function sendToN8N(
         mediaSize: savedMessage.mediaBase64
           ? `${Math.round(savedMessage.mediaBase64.length / 1024)}KB`
           : null,
+        hasKommoIntegration: !!originalWebhook.configs?.kommoSubdomain,
       },
     };
 
@@ -1002,6 +1065,8 @@ async function sendToN8N(
       messageType: savedMessage.messageType,
       hasMedia: !!savedMessage.mediaBase64,
       payloadSize: `${Math.round(JSON.stringify(n8nPayload).length / 1024)}KB`,
+      hasKommoIntegration: !!originalWebhook.configs?.kommoSubdomain,
+      kommoSubdomain: originalWebhook.configs?.kommoSubdomain || "not_configured",
     });
 
     const response = await axios.post(webhookUrl, n8nPayload, {

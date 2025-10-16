@@ -172,12 +172,18 @@ model ConfigIA {
   status             String?
   webhookUrlProd     String?
   webhookUrlDev      String?
+
+  // Campos de integração com Kommo
+  kommoSubdomain     String?             // Subdomínio da conta Kommo
+  kommoAccessToken   String?             // Access token da API Kommo
+  kommodPipelineId   String?             // ID do pipeline onde o agente vai atuar
+
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
 
   // Relação com Evolution Instances
   evolutionInstances EvolutionInstance[]
-  
+
   // Relação com números desativados
   deactivatedAgents  DeactivatedAgent[]
 
