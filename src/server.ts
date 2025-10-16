@@ -315,6 +315,22 @@ io.on("connection", (socket) => {
     logInfo("🧠 Cliente conectado", { socketId: socket.id });
   }
 
+  // Handle join_room event
+  socket.on("join_room", ({ room }: { room: string }) => {
+    socket.join(room);
+    if (ENV.IS_DEVELOPMENT) {
+      logInfo("🚪 Cliente entrou no room", { socketId: socket.id, room });
+    }
+  });
+
+  // Handle leave_room event
+  socket.on("leave_room", ({ room }: { room: string }) => {
+    socket.leave(room);
+    if (ENV.IS_DEVELOPMENT) {
+      logInfo("🚪 Cliente saiu do room", { socketId: socket.id, room });
+    }
+  });
+
   // Handle socket errors
   socket.on("error", (error) => {
     logError("Socket error", error as Error);

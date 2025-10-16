@@ -119,7 +119,7 @@ export default async function (app: FastifyInstance) {
 
         for (const webhook of webhooks) {
           try {
-            const result = await processWebhook(webhook);
+            const result = await processWebhook(app, webhook);
             results.push({
               success: true,
               messageId: result?.sessionId,
@@ -194,6 +194,48 @@ export default async function (app: FastifyInstance) {
         chatId,
       });
 
+      // Emit WebSocket event for real-time AI response updates
+      // Try to extract configIAId from sessionId or chatId
+      // SessionId format is usually: chatId_timestamp_random
+      // ChatId format is usually: phone@s.whatsapp.net
+      if (chatId) {
+        // Try to find the configIA for this chatId
+        try {
+          // Look for any evolution instance that could be associated with this chat
+          const evolutionInstance = await db.evolutionInstance.findFirst({
+            where: {
+              configIAId: {
+                not: null,
+              },
+            },
+            select: {
+              configIAId: true,
+            },
+          });
+
+          if (evolutionInstance?.configIAId) {
+            const agentRoom = `agent:${evolutionInstance.configIAId}`;
+            const contactRoom = `agent:${evolutionInstance.configIAId}:contact:${chatId}`;
+
+            // Emit to agent room (for contact list updates)
+            app.io.to(agentRoom).emit("new_message", aiMessage);
+
+            // Emit to specific contact room (for chat updates)
+            app.io.to(contactRoom).emit("new_message", aiMessage);
+
+            logInfo("📡 [WEBSOCKET] Eventos emitidos para AI response", {
+              agentRoom,
+              contactRoom,
+              sessionId,
+              chatId,
+              isAiResponse: true,
+            });
+          }
+        } catch (error) {
+          logError("Error emitting WebSocket event for AI response", error as Error);
+        }
+      }
+
       return reply.code(StatusCodes.OK).send({
         status: "success",
         message: "AI response saved",
@@ -255,7 +297,7 @@ export default async function (app: FastifyInstance) {
   });
 }
 
-async function processWebhook(webhook: EvolutionWebhookBody) {
+async function processWebhook(app: FastifyInstance, webhook: EvolutionWebhookBody) {
   const { event, instance, data, date_time, sender, server_url, apikey } =
     webhook;
 
@@ -505,6 +547,29 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
         content: messageContent.text?.substring(0, 100),
       });
 
+      // Emit WebSocket event for real-time updates
+      if (configs.configIAId) {
+        const agentRoom = `agent:${configs.configIAId}`;
+        const contactRoom = `agent:${configs.configIAId}:contact:${chatId}`;
+
+        // Emit to agent room (for contact list updates)
+        app.io.to(agentRoom).emit("new_message", myMessage);
+
+        // Emit to specific contact room (for chat updates)
+        app.io.to(contactRoom).emit("new_message", myMessage);
+
+        logInfo("📡 [WEBSOCKET] Eventos emitidos para MyMessages", {
+          agentRoom,
+          contactRoom,
+          messageId: key.id,
+          chatId,
+          direction: "sent",
+        });
+
+        // Check if this is a new contact and emit contact_update event
+        await checkAndEmitNewContact(app, chatId, configs.configIAId, senderName, isGroup);
+      }
+
       return myMessage; // Early return - skip N8N and n8nChatMemory
     }
 
@@ -559,6 +624,30 @@ async function processWebhook(webhook: EvolutionWebhookBody) {
         ? messageContent.text.substring(0, 100)
         : "media",
     });
+
+    // Emit WebSocket event for real-time updates
+    if (configs.configIAId) {
+      const agentRoom = `agent:${configs.configIAId}`;
+      const contactRoom = `agent:${configs.configIAId}:contact:${chatId}`;
+
+      // Emit to agent room (for contact list updates)
+      app.io.to(agentRoom).emit("new_message", savedMessage);
+
+      // Emit to specific contact room (for chat updates)
+      app.io.to(contactRoom).emit("new_message", savedMessage);
+
+      logInfo("📡 [WEBSOCKET] Eventos emitidos para n8nChatMemory", {
+        agentRoom,
+        contactRoom,
+        messageId: key.id,
+        chatId,
+        senderId,
+        direction: savedMessage.direction,
+      });
+
+      // Check if this is a new contact and emit contact_update event
+      await checkAndEmitNewContact(app, chatId, configs.configIAId, senderName, isGroup);
+    }
 
     // Send to N8N webhook if configured and not from me and ConfigIA is active
     // Note: Messages from deactivated numbers are already filtered out earlier in the processWebhook function
@@ -995,6 +1084,60 @@ async function getMediaBase64(
   } catch (error) {
     logError("Failed to get media base64", error as Error);
     return null;
+  }
+}
+
+// Function to check if this is a new contact and emit contact_update event
+async function checkAndEmitNewContact(
+  app: FastifyInstance,
+  chatId: string,
+  configIAId: string,
+  senderName: string,
+  isGroup: boolean
+): Promise<void> {
+  try {
+    // Count total messages for this chatId in both tables
+    // Since we just saved a message, if count is 1, this is a new contact
+    const countInMyMessages = await db.myMessages.count({
+      where: {
+        chatId: chatId,
+      },
+    });
+
+    const countInChatMemory = await db.n8nChatMemory.count({
+      where: {
+        chatId: chatId,
+      },
+    });
+
+    const totalMessages = countInMyMessages + countInChatMemory;
+
+    // If this is the first message from this contact (total = 1)
+    const isNewContact = totalMessages === 1;
+
+    if (isNewContact) {
+      const agentRoom = `agent:${configIAId}`;
+
+      // Emit contact_update event for new contact with proper Contact interface
+      const newContact = {
+        contactId: chatId,
+        contactName: senderName,
+        chatId: chatId,
+        isGroup: isGroup,
+        lastMessageTime: new Date().toISOString(),
+      };
+
+      app.io.to(agentRoom).emit("contact_update", newContact);
+
+      logInfo("📡 [WEBSOCKET] Novo contato detectado - Evento contact_update emitido", {
+        agentRoom,
+        contact: newContact,
+        isNewContact: true,
+        totalMessages,
+      });
+    }
+  } catch (error) {
+    logError("Error checking and emitting new contact event", error as Error);
   }
 }
 
