@@ -172,10 +172,16 @@ export class EvolutionInstanceController {
         JSON.stringify(data, null, 2)
       );
 
-      // Mapear evolutionUrl para serverUrl se necessário
-      const serverUrl = data.serverUrl || data.evolutionUrl;
+      // Usar credenciais do ambiente se não fornecidas (vazias ou undefined)
+      const serverUrl = data.serverUrl || data.evolutionUrl || process.env.DEFAULT_EVOLUTION_URL || "";
+      const apikey = data.apiKey || process.env.DEFAULT_EVOLUTION_API_KEY || "";
       const userId = data.userId || "default-user";
-      const apikey = data.apiKey;
+
+      console.log("🔑 [CREATE INSTANCE] Credenciais utilizadas:", {
+        serverUrl: serverUrl ? "Presente" : "Ausente",
+        apiKey: apikey ? "Presente" : "Ausente",
+        isDefault: (!data.serverUrl && !data.evolutionUrl) || !data.apiKey
+      });
       // Verificar se o servidor Evolution API existe antes de criar instância
       if (serverUrl) {
         console.log(
@@ -261,7 +267,7 @@ export class EvolutionInstanceController {
             const evolutionResponse = await fetch(evolutionCreateUrl, {
               method: "POST",
               headers: {
-                apikey: data.apiKey || "",
+                apikey: apikey,
                 "Content-Type": "application/json",
               },
               body: JSON.stringify(evolutionPayload),
@@ -415,7 +421,7 @@ export class EvolutionInstanceController {
               await fetch(deleteUrl, {
                 method: "DELETE",
                 headers: {
-                  apikey: data.apiKey || "",
+                  apikey: apikey,
                 },
               });
               console.log(
@@ -578,6 +584,9 @@ export class EvolutionInstanceController {
       const { id } = request.params as { id: string };
       const data = request.body as UpdateEvolutionInstanceRequest;
 
+      console.log("🔄 [UPDATE INSTANCE] Iniciando atualização de instância:", id);
+      console.log("📋 [UPDATE INSTANCE] Dados recebidos:", JSON.stringify(data, null, 2));
+
       const instance = await prisma.evolutionInstance.findUnique({
         where: { id },
       });
@@ -589,13 +598,26 @@ export class EvolutionInstanceController {
         });
       }
 
+      // Se serverUrl ou apiKey vierem vazios, usar valores do ambiente
+      const updateData = {
+        ...data,
+        serverUrl: data.serverUrl || process.env.DEFAULT_EVOLUTION_URL || "",
+        apiKey: (data as any).apiKey || process.env.DEFAULT_EVOLUTION_API_KEY || "",
+        updatedAt: new Date(),
+      };
+
+      console.log("🔑 [UPDATE INSTANCE] Credenciais para atualização:", {
+        serverUrl: updateData.serverUrl ? "Presente" : "Ausente",
+        apiKey: updateData.apiKey ? "Presente" : "Ausente",
+        isDefault: !data.serverUrl || !(data as any).apiKey
+      });
+
       const updatedInstance = await prisma.evolutionInstance.update({
         where: { id },
-        data: {
-          ...data,
-          updatedAt: new Date(),
-        },
+        data: updateData,
       });
+
+      console.log("✅ [UPDATE INSTANCE] Instância atualizada com sucesso");
 
       reply.code(200).send({
         success: true,
@@ -603,6 +625,7 @@ export class EvolutionInstanceController {
         instance: updatedInstance,
       });
     } catch (error) {
+      console.log("💥 [UPDATE INSTANCE] Erro ao atualizar:", error);
       reply.code(500).send({
         success: false,
         message: "Erro interno do servidor",
@@ -988,13 +1011,23 @@ export class EvolutionInstanceController {
         });
       }
 
+      // Usar credenciais do ambiente se não houver credenciais específicas
+      const serverUrl = instance.serverUrl || process.env.DEFAULT_EVOLUTION_URL || "";
+      const apiKey = instance.apiKey || process.env.DEFAULT_EVOLUTION_API_KEY || "";
+
+      console.log("🔑 [GET QR CODE] Credenciais utilizadas:", {
+        serverUrl: serverUrl ? "Presente" : "Ausente",
+        apiKey: apiKey ? "Presente" : "Ausente",
+        isDefault: !instance.serverUrl || !instance.apiKey
+      });
+
       // Gerar QR Code via Evolution API
-      if (instance.serverUrl && instance.apiKey) {
+      if (serverUrl && apiKey) {
         try {
           const qrCodeData = await this.generateQRCode({
             instanceName: instance.instanceName,
-            serverUrl: instance.serverUrl,
-            apiKey: instance.apiKey,
+            serverUrl: serverUrl,
+            apiKey: apiKey,
           });
 
           return reply.code(200).send({
@@ -1129,17 +1162,27 @@ export class EvolutionInstanceController {
         });
       }
 
-      if (!instance.serverUrl || !instance.apiKey) {
+      // Usar credenciais do ambiente se não houver credenciais específicas
+      const serverUrl = instance.serverUrl || process.env.DEFAULT_EVOLUTION_URL || "";
+      const apiKey = instance.apiKey || process.env.DEFAULT_EVOLUTION_API_KEY || "";
+
+      console.log("🔑 [REFRESH STATUS] Credenciais utilizadas:", {
+        serverUrl: serverUrl ? "Presente" : "Ausente",
+        apiKey: apiKey ? "Presente" : "Ausente",
+        isDefault: !instance.serverUrl || !instance.apiKey
+      });
+
+      if (!serverUrl || !apiKey) {
         return reply.code(400).send({
           success: false,
           message:
-            "Instância não possui configurações válidas (serverUrl ou apiKey)",
+            "Instância não possui configurações válidas (serverUrl ou apiKey) e não há credenciais padrão configuradas",
         });
       }
 
       try {
         // Verificar status na Evolution API
-        const evolutionStatusUrl = `${instance.serverUrl.replace(/\/$/, "")}/instance/connectionState/${instance.instanceName}`;
+        const evolutionStatusUrl = `${serverUrl.replace(/\/$/, "")}/instance/connectionState/${instance.instanceName}`;
 
         console.log(
           `🌐 [REFRESH STATUS] Consultando Evolution API: ${evolutionStatusUrl}`
@@ -1148,7 +1191,7 @@ export class EvolutionInstanceController {
         const response = await fetch(evolutionStatusUrl, {
           method: "GET",
           headers: {
-            apikey: instance.apiKey,
+            apikey: apiKey,
             "Content-Type": "application/json",
           },
           signal: AbortSignal.timeout(10000), // 10 segundos timeout
@@ -1226,11 +1269,11 @@ export class EvolutionInstanceController {
           // Se conectado, buscar informações do perfil
           if (newConnectionState === "CONNECTED") {
             try {
-              const profileUrl = `${instance.serverUrl.replace(/\/$/, "")}/instance/fetchInstances/${instance.instanceName}`;
+              const profileUrl = `${serverUrl.replace(/\/$/, "")}/instance/fetchInstances/${instance.instanceName}`;
               const profileResponse = await fetch(profileUrl, {
                 method: "GET",
                 headers: {
-                  apikey: instance.apiKey,
+                  apikey: apiKey,
                   "Content-Type": "application/json",
                 },
                 signal: AbortSignal.timeout(5000),
