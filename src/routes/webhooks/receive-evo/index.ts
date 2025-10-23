@@ -164,16 +164,68 @@ export default async function (app: FastifyInstance) {
 
   // Endpoint to receive AI responses
   app.post<{
-    Body: { sessionId: string; aiResponse: string; chatId?: string };
+    Body: { sessionId: string; aiResponse: string; chatId?: string; configIAId?: string; instanceName?: string };
   }>("/ai-response", async (req, reply) => {
     try {
-      const { sessionId, aiResponse, chatId } = req.body;
+      const { sessionId, aiResponse, chatId, configIAId, instanceName } = req.body;
 
       if (!sessionId || !aiResponse) {
         return reply.code(StatusCodes.BAD_REQUEST).send({
           status: "error",
           message: "sessionId and aiResponse are required",
         });
+      }
+
+      // Buscar configIAId se não foi fornecido
+      let finalConfigIAId = configIAId;
+      let finalInstanceName = instanceName;
+
+      if (!finalConfigIAId && instanceName) {
+        // Tentar encontrar configIAId pela instanceName
+        const evolutionInstance = await db.evolutionInstance.findFirst({
+          where: {
+            instanceName: instanceName,
+            configIAId: {
+              not: null,
+            },
+          },
+          select: {
+            configIAId: true,
+          },
+        });
+        finalConfigIAId = evolutionInstance?.configIAId || undefined;
+      }
+
+      // Se ainda não temos configIAId, tentar buscar da última mensagem deste chat
+      if (!finalConfigIAId && chatId) {
+        const lastMessage = await db.n8nChatMemory.findFirst({
+          where: {
+            chatId: chatId,
+          },
+          orderBy: {
+            timestamp: "desc",
+          },
+          select: {
+            instanceName: true,
+          },
+        });
+
+        if (lastMessage?.instanceName) {
+          const evolutionInstance = await db.evolutionInstance.findFirst({
+            where: {
+              instanceName: lastMessage.instanceName,
+              configIAId: {
+                not: null,
+              },
+            },
+            select: {
+              configIAId: true,
+              instanceName: true,
+            },
+          });
+          finalConfigIAId = evolutionInstance?.configIAId || undefined;
+          finalInstanceName = evolutionInstance?.instanceName || finalInstanceName;
+        }
       }
 
       const aiMessage = await db.myMessages.create({
@@ -184,6 +236,7 @@ export default async function (app: FastifyInstance) {
           aiResponse: aiResponse,
           isAiResponse: true,
           chatId: chatId || null,
+          instanceName: finalInstanceName || null,
           createdAt: new Date(),
         },
       });
@@ -192,48 +245,39 @@ export default async function (app: FastifyInstance) {
         sessionId,
         aiResponse: aiResponse.substring(0, 100),
         chatId,
+        configIAId: finalConfigIAId,
+        instanceName: finalInstanceName,
       });
 
       // Emit WebSocket event for real-time AI response updates
-      // Try to extract configIAId from sessionId or chatId
-      // SessionId format is usually: chatId_timestamp_random
-      // ChatId format is usually: phone@s.whatsapp.net
-      if (chatId) {
-        // Try to find the configIA for this chatId
+      if (chatId && finalConfigIAId) {
         try {
-          // Look for any evolution instance that could be associated with this chat
-          const evolutionInstance = await db.evolutionInstance.findFirst({
-            where: {
-              configIAId: {
-                not: null,
-              },
-            },
-            select: {
-              configIAId: true,
-            },
+          const agentRoom = `agent:${finalConfigIAId}`;
+          const contactRoom = `agent:${finalConfigIAId}:contact:${chatId}`;
+
+          // Emit to agent room (for contact list updates)
+          app.io.to(agentRoom).emit("new_message", aiMessage);
+
+          // Emit to specific contact room (for chat updates)
+          app.io.to(contactRoom).emit("new_message", aiMessage);
+
+          logInfo("📡 [WEBSOCKET] Eventos emitidos para AI response", {
+            agentRoom,
+            contactRoom,
+            sessionId,
+            chatId,
+            configIAId: finalConfigIAId,
+            isAiResponse: true,
           });
-
-          if (evolutionInstance?.configIAId) {
-            const agentRoom = `agent:${evolutionInstance.configIAId}`;
-            const contactRoom = `agent:${evolutionInstance.configIAId}:contact:${chatId}`;
-
-            // Emit to agent room (for contact list updates)
-            app.io.to(agentRoom).emit("new_message", aiMessage);
-
-            // Emit to specific contact room (for chat updates)
-            app.io.to(contactRoom).emit("new_message", aiMessage);
-
-            logInfo("📡 [WEBSOCKET] Eventos emitidos para AI response", {
-              agentRoom,
-              contactRoom,
-              sessionId,
-              chatId,
-              isAiResponse: true,
-            });
-          }
         } catch (error) {
           logError("Error emitting WebSocket event for AI response", error as Error);
         }
+      } else {
+        logInfo("⚠️ [WEBSOCKET] Não foi possível emitir evento - faltando chatId ou configIAId", {
+          chatId: !!chatId,
+          configIAId: !!finalConfigIAId,
+          sessionId,
+        });
       }
 
       return reply.code(StatusCodes.OK).send({
