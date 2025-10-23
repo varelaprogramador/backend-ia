@@ -41,6 +41,7 @@ export interface CreateEvolutionInstanceRequest {
 
 export interface UpdateEvolutionInstanceRequest {
   displayName?: string
+  serverUrl?: string
   webhookUrl?: string
   webhookByEvents?: boolean
   webhookBase64?: boolean

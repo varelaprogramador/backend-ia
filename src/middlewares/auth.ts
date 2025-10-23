@@ -18,7 +18,9 @@ declare module 'fastify' {
 
 declare global {
   interface UserPublicMetadata {
-    role: string;
+    role?: string;
+    is_admin?: boolean;
+    [key: string]: any;
   }
 }
 
