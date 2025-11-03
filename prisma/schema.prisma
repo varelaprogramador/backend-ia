@@ -48,6 +48,7 @@ model User {
   blockedContacts    BlockedContact[]
   evolutionInstances EvolutionInstance[]
   deactivatedAgents  DeactivatedAgent[]
+  credentials        Credential[]
 
   @@map("users")
 }
@@ -253,44 +254,84 @@ model DeactivatedAgent {
 
 model SystemConfig {
   id               String   @id @default(cuid())
-  
+
   // Branding
   systemName       String   @default("AI System")
   systemTitle      String   @default("AI Management Platform")
   systemDescription String?
-  
+
   // SEO
   seoTitle         String?
   seoDescription   String?
   seoKeywords      String?
-  
+
   // Visual Identity
   logoUrl          String?
   logoUrlDark      String?  // Logo para modo escuro
   faviconUrl       String?
   primaryColor     String?  @default("#000000")
   secondaryColor   String?  @default("#ffffff")
-  
+
   // Contact & Links
   contactEmail     String?
   supportUrl       String?
   websiteUrl       String?
   privacyPolicyUrl String?
   termsOfServiceUrl String?
-  
+
   // Social Media
   facebookUrl      String?
   twitterUrl       String?
   linkedinUrl      String?
   instagramUrl     String?
-  
+
   // System Settings
   maintenanceMode  Boolean  @default(false)
   allowRegistration Boolean @default(true)
   version          String?  @default("1.0.0")
-  
+
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
-  
+
   @@map("system_config")
+}
+
+model Credential {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  type      CredentialType
+
+  // Configurações de requisição
+  url       String
+  method    String   @default("POST")
+
+  // Headers customizados
+  authHeaderKey   String?  @default("X-N8N-API-KEY")
+  authHeaderValue String?
+  customHeaders   Json?    // Objeto JSON para headers adicionais
+
+  // Configurações de resposta
+  awaitResponse   Boolean  @default(false)
+  successModel    Json?    // Modelo de resposta esperado quando sucesso
+
+  // Dados da requisição
+  data      Json?
+
+  // Metadados
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([type])
+  @@map("credentials")
+}
+
+enum CredentialType {
+  GOOGLE_CALENDAR
+  CHATGPT
+  N8N
+  CUSTOM
 }
