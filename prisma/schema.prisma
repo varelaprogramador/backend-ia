@@ -179,6 +179,9 @@ model ConfigIA {
   kommoAccessToken   String?             // Access token da API Kommo
   kommodPipelineId   String?             // ID do pipeline onde o agente vai atuar
 
+  // Credenciais vinculadas
+  credentialIds      String[]            @default([]) // Array de IDs de credenciais
+
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
 
@@ -318,6 +321,9 @@ model Credential {
 
   // Dados da requisição
   data      Json?
+
+  // ID da credencial no N8N
+  id_n8n    String?  @unique // ID retornado pelo N8N ao criar a credencial
 
   // Metadados
   isActive  Boolean  @default(true)

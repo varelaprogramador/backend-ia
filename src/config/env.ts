@@ -32,7 +32,7 @@ const envSchema = z.object({
   CLERK_SECRET_KEY: z.string().trim().optional(),
   CLERK_WEBHOOK_USER_SECRET: z.string().trim().optional(),
   CLERK_PUBLISHABLE_KEY: z.string().trim().optional(),
-
+  N8N_API_CREDENTIALS_URL: z.string().trim().optional(),
   // Banco de dados
   DATABASE_URL: z
     .string()
@@ -69,10 +69,31 @@ const envSchema = z.object({
     .url("N8N_WEBHOOK_URL deve ser uma URL válida")
     .optional(),
 
-  // My Phone Number for message identification
-  MY_PHONE_NUMBER: z
+  // N8N Webhook for Credentials
+  WEBHOOK_N8N_CREDENTIALS_URL: z
     .string()
-    .optional()
+    .url("WEBHOOK_N8N_CREDENTIALS_URL deve ser uma URL válida")
+    .optional(),
+
+  // N8N Default Credentials
+  DEFAULT_N8N_URL: z
+    .string()
+    .url("DEFAULT_N8N_URL deve ser uma URL válida")
+    .optional(),
+  DEFAULT_N8N_API_KEY: z.string().optional(),
+
+  // Default URLs for each credential type
+  DEFAULT_CHATGPT_URL: z
+    .string()
+    .url("DEFAULT_CHATGPT_URL deve ser uma URL válida")
+    .optional(),
+  DEFAULT_GOOGLE_CALENDAR_URL: z
+    .string()
+    .url("DEFAULT_GOOGLE_CALENDAR_URL deve ser uma URL válida")
+    .optional(),
+
+  // My Phone Number for message identification
+  MY_PHONE_NUMBER: z.string().optional(),
 });
 
 // Tipagem das variáveis de ambiente validadas
@@ -148,6 +169,16 @@ export const ENV = {
 
   // N8N Webhook
   N8N_WEBHOOK_URL: env.N8N_WEBHOOK_URL,
+  WEBHOOK_N8N_CREDENTIALS_URL: env.WEBHOOK_N8N_CREDENTIALS_URL,
+
+  // N8N Default Credentials
+  DEFAULT_N8N_URL: env.DEFAULT_N8N_URL,
+  DEFAULT_N8N_API_KEY: env.DEFAULT_N8N_API_KEY,
+  N8N_API_CREDENTIALS_URL: env.N8N_API_CREDENTIALS_URL,
+
+  // Default URLs for each credential type
+  DEFAULT_CHATGPT_URL: env.DEFAULT_CHATGPT_URL,
+  DEFAULT_GOOGLE_CALENDAR_URL: env.DEFAULT_GOOGLE_CALENDAR_URL,
 
   // My Phone Number
   MY_PHONE_NUMBER: env.MY_PHONE_NUMBER,

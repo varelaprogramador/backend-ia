@@ -3,6 +3,11 @@ import { z } from "zod";
 import { db } from "@/lib/db";
 import { formatResponse } from "@/utils/response-formatter";
 import { logError, logInfo } from "@/utils/logger";
+import {
+  loadN8NWorkflowTemplate,
+  replaceN8NCredentialIds,
+  validateN8NCredentials,
+} from "@/utils/replace-n8n-credential-ids";
 
 const configIASchema = z.object({
   userId: z.string(),
@@ -15,6 +20,8 @@ const configIASchema = z.object({
   kommoSubdomain: z.string().optional().or(z.literal("")),
   kommoAccessToken: z.string().optional().or(z.literal("")),
   kommodPipelineId: z.string().optional().or(z.literal("")),
+  // Credenciais vinculadas
+  credentialIds: z.array(z.string()).optional().default([]),
 });
 
 const updateConfigIASchema = configIASchema.partial().omit({ userId: true });
@@ -251,25 +258,29 @@ export default async function (fastify: FastifyInstance) {
         const configsWithMetrics = await Promise.all(
           configs.map(async (config) => {
             // Pegar instanceNames vinculados a este config
-            const instanceNames = config.evolutionInstances.map(i => i.instanceName);
+            const instanceNames = config.evolutionInstances.map(
+              (i) => i.instanceName
+            );
 
             // Contar mensagens do n8nChatMemory
-            const n8nMessageCount = instanceNames.length > 0
-              ? await db.n8nChatMemory.count({
-                  where: {
-                    instanceName: { in: instanceNames },
-                  },
-                })
-              : 0;
+            const n8nMessageCount =
+              instanceNames.length > 0
+                ? await db.n8nChatMemory.count({
+                    where: {
+                      instanceName: { in: instanceNames },
+                    },
+                  })
+                : 0;
 
             // Contar mensagens do MyMessages
-            const myMessageCount = instanceNames.length > 0
-              ? await db.myMessages.count({
-                  where: {
-                    instanceName: { in: instanceNames },
-                  },
-                })
-              : 0;
+            const myMessageCount =
+              instanceNames.length > 0
+                ? await db.myMessages.count({
+                    where: {
+                      instanceName: { in: instanceNames },
+                    },
+                  })
+                : 0;
 
             // Total de mensagens
             const totalMessages = n8nMessageCount + myMessageCount;
@@ -298,6 +309,313 @@ export default async function (fastify: FastifyInstance) {
     }
   );
 
+  // POST /config-ia/create-with-n8n - Create AI configuration with N8N integration first
+  fastify.post(
+    "/create-with-n8n",
+    {
+      schema: {
+        tags: ["Configurações IA"],
+        description:
+          "Create workspace in N8N first, then create in database if successful",
+        body: {
+          type: "object",
+          properties: {
+            userId: { type: "string" },
+            nome: { type: "string", minLength: 1 },
+            prompt: { type: "string", minLength: 1 },
+            status: { type: "string" },
+            webhookUrlProd: { type: "string" },
+            webhookUrlDev: { type: "string" },
+            kommoSubdomain: { type: "string" },
+            kommoAccessToken: { type: "string" },
+            kommodPipelineId: { type: "string" },
+            credentialIds: { type: "array", items: { type: "string" } },
+          },
+          required: ["userId", "nome", "prompt"],
+        },
+      },
+    },
+    async (request, reply) => {
+      try {
+        const body = request.body as any;
+        const validatedData = configIASchema.parse(body);
+
+        // Check if user exists
+        const user = await db.user.findUnique({
+          where: { id: validatedData.userId },
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            username: true,
+          },
+        });
+
+        if (!user) {
+          return reply.code(404).send(
+            formatResponse({
+              success: false,
+              message: "Usuário não encontrado",
+            })
+          );
+        }
+
+        // Buscar as credenciais vinculadas
+        const credentials =
+          validatedData.credentialIds && validatedData.credentialIds.length > 0
+            ? await db.credential.findMany({
+                where: {
+                  id: { in: validatedData.credentialIds },
+                },
+                select: {
+                  id: true,
+                  id_n8n: true,
+                  name: true,
+                  type: true,
+                  url: true,
+                  method: true,
+                  authHeaderKey: true,
+                  authHeaderValue: true,
+                  customHeaders: true,
+                  data: true,
+                },
+              })
+            : [];
+
+        // Carregar template do workflow N8N
+        const workflowTemplate = loadN8NWorkflowTemplate(request.log);
+
+        // Validar se todas as credenciais necessárias possuem id_n8n
+        const validation = validateN8NCredentials(
+          workflowTemplate,
+          credentials,
+          request.log
+        );
+
+        if (!validation.valid) {
+          logError(
+            "Missing N8N credential IDs",
+            new Error(
+              `Credenciais sem id_n8n: ${validation.missing.join(", ")}`
+            )
+          );
+          return reply.code(400).send(
+            formatResponse({
+              success: false,
+              message: "Algumas credenciais não possuem ID do N8N",
+              error: `Tipos faltando: ${validation.missing.join(", ")}`,
+            })
+          );
+        }
+
+        // Substituir os IDs das credenciais no template
+        const workflowWithIds = replaceN8NCredentialIds(
+          workflowTemplate,
+          credentials,
+          validatedData.nome,
+          request.log
+        );
+
+        // Preparar dados para enviar ao N8N
+        const workspaceDataForN8N = {
+          workspaceName: validatedData.nome,
+          workflow: workflowWithIds, // Template do workflow com IDs substituídos
+          prompt: validatedData.prompt,
+          status: validatedData.status || "development",
+          webhookUrlDev: validatedData.webhookUrlDev,
+          webhookUrlProd: validatedData.webhookUrlProd,
+          user: {
+            id: user.id,
+            name:
+              `${user.firstName || ""} ${user.lastName || ""}`.trim() ||
+              user.username ||
+              "Usuário",
+          },
+          credentials: credentials.map((cred) => ({
+            id: cred.id,
+            id_n8n: cred.id_n8n, // ID da credencial no N8N
+            name: cred.name,
+            type: cred.type,
+            url: cred.url,
+            method: cred.method,
+            authHeaderKey: cred.authHeaderKey,
+            authHeaderValue: cred.authHeaderValue,
+            customHeaders: cred.customHeaders,
+            data: cred.data,
+          })),
+          kommo:
+            validatedData.kommoSubdomain && validatedData.kommoAccessToken
+              ? {
+                  enabled: true,
+                  subdomain: validatedData.kommoSubdomain,
+                  accessToken: validatedData.kommoAccessToken,
+                  pipelineId: validatedData.kommodPipelineId,
+                }
+              : { enabled: false },
+        };
+
+        // Enviar para o N8N
+        const n8nWebhookUrl = process.env.N8N_CREATE_WORKSPACE_URL;
+        if (!n8nWebhookUrl) {
+          return reply.code(500).send(
+            formatResponse({
+              success: false,
+              message: "URL do webhook N8N não configurada",
+            })
+          );
+        }
+
+        logInfo("Sending workspace data to N8N", {
+          workspaceName: validatedData.nome,
+          webhookUrl: n8nWebhookUrl,
+        });
+
+        let n8nResponse;
+        let n8nData;
+
+        try {
+          n8nResponse = await fetch(n8nWebhookUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(workspaceDataForN8N),
+          });
+        } catch (fetchError: any) {
+          // Erro de rede ou timeout
+          logError("N8N webhook connection failed", fetchError);
+          return reply.code(500).send(
+            formatResponse({
+              success: false,
+              message: "Não foi possível conectar ao N8N",
+              error:
+                "O webhook do N8N pode estar desligado ou inacessível. Verifique se o fluxo está ativo no N8N.",
+            })
+          );
+        }
+
+        // HTTP Error (404, 500, etc)
+        if (!n8nResponse.ok) {
+          const errorText = await n8nResponse.text();
+          logError(
+            "N8N webhook HTTP error",
+            new Error(`Status: ${n8nResponse.status}, Response: ${errorText}`)
+          );
+
+          let errorMessage = "Erro ao comunicar com o N8N";
+          let errorDetail = errorText;
+
+          if (n8nResponse.status === 404) {
+            errorMessage = "Webhook do N8N não encontrado";
+            errorDetail =
+              "O fluxo pode estar desligado ou o webhook foi removido. Ative o fluxo no N8N e tente novamente.";
+          } else if (n8nResponse.status >= 500) {
+            errorMessage = "Erro interno no N8N";
+            errorDetail =
+              "O N8N está com problemas. Tente novamente em alguns instantes.";
+          }
+
+          return reply.code(500).send(
+            formatResponse({
+              success: false,
+              message: errorMessage,
+              error: errorDetail,
+            })
+          );
+        }
+
+        // Parse JSON response
+        try {
+          n8nData = await n8nResponse.json();
+          logInfo("N8N response received", { n8nData });
+        } catch (parseError) {
+          logError("N8N response parse error", parseError as Error);
+          return reply.code(500).send(
+            formatResponse({
+              success: false,
+              message: "Resposta inválida do N8N",
+              error: "O N8N retornou uma resposta que não pôde ser processada.",
+            })
+          );
+        }
+
+        // Validar se o N8N retornou success: true
+        if (!n8nData || n8nData.success !== true) {
+          logError(
+            "N8N did not return success",
+            new Error(`N8N response: ${JSON.stringify(n8nData)}`)
+          );
+
+          // N8N retornou explicitamente success: false
+          const errorMessage =
+            n8nData?.message ||
+            n8nData?.error ||
+            "O N8N não confirmou a criação do workspace";
+
+          return reply.code(500).send(
+            formatResponse({
+              success: false,
+              message: "Falha ao criar workspace no N8N",
+              error: errorMessage,
+            })
+          );
+        }
+
+        logInfo("N8N workspace created successfully", { n8nData });
+
+        // Se o N8N retornou sucesso, criar no banco de dados
+        const dataToCreate = {
+          ...validatedData,
+          webhookUrlProd: validatedData.webhookUrlProd || null,
+          webhookUrlDev: validatedData.webhookUrlDev || null,
+          kommoSubdomain: validatedData.kommoSubdomain || null,
+          kommoAccessToken: validatedData.kommoAccessToken || null,
+          kommodPipelineId: validatedData.kommodPipelineId || null,
+        };
+
+        const config = await db.configIA.create({
+          data: dataToCreate,
+          include: {
+            user: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                username: true,
+                primaryEmailId: true,
+              },
+            },
+          },
+        });
+
+        logInfo("AI configuration created after N8N success", {
+          id: config.id,
+          userId: config.userId,
+          nome: config.nome,
+        });
+
+        const response = formatResponse({
+          data: {
+            workspace: config,
+            n8nResponse: n8nData,
+          },
+          message: "Workspace criado com sucesso no N8N e no sistema",
+        });
+
+        return reply.code(201).send(response);
+      } catch (error: any) {
+        logError("Error creating workspace with N8N", error as Error);
+        return reply.code(500).send(
+          formatResponse({
+            success: false,
+            message: "Erro interno do servidor",
+            error: error.message,
+          })
+        );
+      }
+    }
+  );
+
   // POST /config-ia - Create AI configuration
   fastify.post(
     "/",
@@ -317,6 +635,7 @@ export default async function (fastify: FastifyInstance) {
             kommoSubdomain: { type: "string" },
             kommoAccessToken: { type: "string" },
             kommodPipelineId: { type: "string" },
+            credentialIds: { type: "array", items: { type: "string" } },
           },
           required: ["userId", "nome", "prompt"],
         },
@@ -377,7 +696,10 @@ export default async function (fastify: FastifyInstance) {
           message: "Configuração de IA criada com sucesso",
         });
 
-        console.log("📤 [CREATE CONFIG] Response data:", JSON.stringify(response, null, 2));
+        console.log(
+          "📤 [CREATE CONFIG] Response data:",
+          JSON.stringify(response, null, 2)
+        );
 
         return reply.code(201).send(response);
       } catch (error: any) {
@@ -417,6 +739,7 @@ export default async function (fastify: FastifyInstance) {
             kommoSubdomain: { type: "string" },
             kommoAccessToken: { type: "string" },
             kommodPipelineId: { type: "string" },
+            credentialIds: { type: "array", items: { type: "string" } },
           },
         },
       },
@@ -870,11 +1193,11 @@ export default async function (fastify: FastifyInstance) {
           configIAId: id,
           instanceIds,
           bodyType: typeof request.body,
-          bodyContent: JSON.stringify(request.body)
+          bodyContent: JSON.stringify(request.body),
         });
 
         // Validar dados de entrada
-        if (!id || typeof id !== 'string') {
+        if (!id || typeof id !== "string") {
           return reply.code(400).send(
             formatResponse({
               success: false,
@@ -883,11 +1206,16 @@ export default async function (fastify: FastifyInstance) {
           );
         }
 
-        if (!instanceIds || !Array.isArray(instanceIds) || instanceIds.length === 0) {
+        if (
+          !instanceIds ||
+          !Array.isArray(instanceIds) ||
+          instanceIds.length === 0
+        ) {
           return reply.code(400).send(
             formatResponse({
               success: false,
-              message: "Lista de IDs de instâncias é obrigatória e não pode estar vazia",
+              message:
+                "Lista de IDs de instâncias é obrigatória e não pode estar vazia",
             })
           );
         }
@@ -985,7 +1313,7 @@ export default async function (fastify: FastifyInstance) {
           error: error instanceof Error ? error.message : String(error),
           stack: error instanceof Error ? error.stack : undefined,
           configIAId: request.params,
-          requestBody: request.body
+          requestBody: request.body,
         });
 
         logError("Error assigning instances to ConfigIA", error as Error);
@@ -1126,11 +1454,11 @@ export default async function (fastify: FastifyInstance) {
           configIAId: id,
           instanceIds,
           bodyType: typeof request.body,
-          bodyContent: JSON.stringify(request.body)
+          bodyContent: JSON.stringify(request.body),
         });
 
         // Validar dados de entrada
-        if (!id || typeof id !== 'string') {
+        if (!id || typeof id !== "string") {
           return reply.code(400).send(
             formatResponse({
               success: false,
@@ -1139,11 +1467,16 @@ export default async function (fastify: FastifyInstance) {
           );
         }
 
-        if (!instanceIds || !Array.isArray(instanceIds) || instanceIds.length === 0) {
+        if (
+          !instanceIds ||
+          !Array.isArray(instanceIds) ||
+          instanceIds.length === 0
+        ) {
           return reply.code(400).send(
             formatResponse({
               success: false,
-              message: "Lista de IDs de instâncias é obrigatória e não pode estar vazia",
+              message:
+                "Lista de IDs de instâncias é obrigatória e não pode estar vazia",
             })
           );
         }
@@ -1211,13 +1544,228 @@ export default async function (fastify: FastifyInstance) {
           error: error instanceof Error ? error.message : String(error),
           stack: error instanceof Error ? error.stack : undefined,
           configIAId: request.params,
-          requestBody: request.body
+          requestBody: request.body,
         });
 
         logError(
           "Error unassigning multiple instances from ConfigIA",
           error as Error
         );
+        return reply.code(500).send(
+          formatResponse({
+            success: false,
+            message: "Erro interno do servidor",
+            error: error instanceof Error ? error.message : "Erro desconhecido",
+          })
+        );
+      }
+    }
+  );
+
+  // POST /config-ia/:id/create-n8n-workspace - Create workspace in N8N
+  fastify.post(
+    "/:id/create-n8n-workspace",
+    {
+      schema: {
+        tags: ["Configurações IA"],
+        description: "Create workspace in N8N for this configuration",
+        params: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+          },
+          required: ["id"],
+        },
+      },
+    },
+    async (request, reply) => {
+      try {
+        const { id } = request.params as { id: string };
+
+        // Buscar o ConfigIA com as credenciais vinculadas
+        const configIA = await db.configIA.findUnique({
+          where: { id },
+          include: {
+            user: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                username: true,
+              },
+            },
+          },
+        });
+
+        if (!configIA) {
+          return reply.code(404).send(
+            formatResponse({
+              success: false,
+              message: "Configuração de IA não encontrada",
+            })
+          );
+        }
+
+        // Buscar as credenciais vinculadas
+        const credentials =
+          configIA.credentialIds.length > 0
+            ? await db.credential.findMany({
+                where: {
+                  id: { in: configIA.credentialIds },
+                },
+                select: {
+                  id: true,
+                  id_n8n: true,
+                  name: true,
+                  type: true,
+                  url: true,
+                  method: true,
+                  authHeaderKey: true,
+                  authHeaderValue: true,
+                  customHeaders: true,
+                  data: true,
+                },
+              })
+            : [];
+
+        // Carregar template do workflow N8N
+        const workflowTemplate = loadN8NWorkflowTemplate(request.log);
+
+        // Validar se todas as credenciais necessárias possuem id_n8n
+        const validation = validateN8NCredentials(
+          workflowTemplate,
+          credentials,
+          request.log
+        );
+
+        if (!validation.valid) {
+          logError(
+            "Missing N8N credential IDs",
+            new Error(
+              `Credenciais sem id_n8n: ${validation.missing.join(", ")}`
+            )
+          );
+          return reply.code(400).send(
+            formatResponse({
+              success: false,
+              message: "Algumas credenciais não possuem ID do N8N",
+              error: `Tipos faltando: ${validation.missing.join(", ")}`,
+            })
+          );
+        }
+
+        // Substituir os IDs das credenciais no template
+        const workflowWithIds = replaceN8NCredentialIds(
+          workflowTemplate,
+          credentials,
+          configIA.nome,
+          request.log
+        );
+
+        // Preparar dados para enviar ao N8N
+        const workspaceData = {
+          workspaceId: configIA.id,
+          workspaceName: configIA.nome,
+          workflow: workflowWithIds, // Template do workflow com IDs substituídos
+          prompt: configIA.prompt,
+          status: configIA.status,
+          webhookUrlDev: configIA.webhookUrlDev,
+          webhookUrlProd: configIA.webhookUrlProd,
+          user: {
+            id: configIA.user.id,
+            name:
+              `${configIA.user.firstName || ""} ${configIA.user.lastName || ""}`.trim() ||
+              configIA.user.username ||
+              "Usuário",
+          },
+          credentials: credentials.map((cred) => ({
+            id: cred.id,
+            id_n8n: cred.id_n8n, // ID da credencial no N8N
+            name: cred.name,
+            type: cred.type,
+            url: cred.url,
+            method: cred.method,
+            authHeaderKey: cred.authHeaderKey,
+            authHeaderValue: cred.authHeaderValue,
+            customHeaders: cred.customHeaders,
+            data: cred.data,
+          })),
+          kommo:
+            configIA.kommoSubdomain && configIA.kommoAccessToken
+              ? {
+                  enabled: true,
+                  subdomain: configIA.kommoSubdomain,
+                  accessToken: configIA.kommoAccessToken,
+                  pipelineId: configIA.kommodPipelineId,
+                }
+              : { enabled: false },
+          createdAt: configIA.createdAt,
+        };
+
+        // Enviar para o N8N
+        const n8nWebhookUrl = process.env.N8N_CREATE_WORKSPACE_URL;
+
+        if (!n8nWebhookUrl) {
+          logError(
+            "N8N_CREATE_WORKSPACE_URL not configured",
+            new Error("Missing environment variable")
+          );
+          return reply.code(500).send(
+            formatResponse({
+              success: false,
+              message: "URL do N8N não configurada no servidor",
+            })
+          );
+        }
+
+        logInfo("Sending workspace data to N8N", {
+          configIAId: configIA.id,
+          configIAName: configIA.nome,
+          credentialsCount: credentials.length,
+          webhookUrl: n8nWebhookUrl,
+        });
+
+        const response = await fetch(n8nWebhookUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(workspaceData),
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          logError(
+            "N8N webhook request failed",
+            new Error(`Status: ${response.status}, Response: ${errorText}`)
+          );
+          return reply.code(500).send(
+            formatResponse({
+              success: false,
+              message: "Erro ao criar workspace no N8N",
+              error: errorText,
+            })
+          );
+        }
+
+        const n8nResponse = await response.json();
+
+        logInfo("Workspace created in N8N", {
+          configIAId: configIA.id,
+          configIAName: configIA.nome,
+          n8nResponse,
+        });
+
+        return formatResponse({
+          data: {
+            workspace: configIA,
+            n8nResponse,
+            credentialsCount: credentials.length,
+          },
+          message: "Workspace criado no N8N com sucesso",
+        });
+      } catch (error) {
+        logError("Error creating workspace in N8N", error as Error);
         return reply.code(500).send(
           formatResponse({
             success: false,
