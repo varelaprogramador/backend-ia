@@ -419,6 +419,13 @@ export default async function (fastify: FastifyInstance) {
           request.log
         );
 
+        // Log das URLs de webhook geradas
+        console.log("=== WEBHOOK URLs GERADAS ===");
+        console.log("Webhook Dev:", webhookUrlDev);
+        console.log("Webhook Prod:", webhookUrlProd);
+        console.log("Webhook Path:", webhookPath);
+        console.log("============================");
+
         // Preparar dados para enviar ao N8N
         const workspaceDataForN8N = {
           workspaceName: validatedData.nome,
