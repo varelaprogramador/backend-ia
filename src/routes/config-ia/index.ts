@@ -552,7 +552,9 @@ export default async function (fastify: FastifyInstance) {
         }
 
         // Validar se o N8N retornou success: true
-        if (!n8nData || n8nData.success !== true) {
+        // Nota: Aceita tanto "success" quanto "sucess" (typo comum no N8N)
+        const isSuccess = n8nData?.success === true || n8nData?.sucess === true;
+        if (!n8nData || !isSuccess) {
           logError(
             "N8N did not return success",
             new Error(`N8N response: ${JSON.stringify(n8nData)}`)
@@ -576,10 +578,11 @@ export default async function (fastify: FastifyInstance) {
         logInfo("N8N workspace created successfully", { n8nData });
 
         // Se o N8N retornou sucesso, criar no banco de dados
+        // Usar as URLs de webhook geradas automaticamente (não do validatedData)
         const dataToCreate = {
           ...validatedData,
-          webhookUrlProd: validatedData.webhookUrlProd || null,
-          webhookUrlDev: validatedData.webhookUrlDev || null,
+          webhookUrlProd: webhookUrlProd,
+          webhookUrlDev: webhookUrlDev,
           kommoSubdomain: validatedData.kommoSubdomain || null,
           kommoAccessToken: validatedData.kommoAccessToken || null,
           kommodPipelineId: validatedData.kommodPipelineId || null,
