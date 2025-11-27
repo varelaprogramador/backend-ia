@@ -2804,7 +2804,7 @@
       {
         "parameters": {
           "httpMethod": "POST",
-          "path": "cd362a18-1ffd-45c3-8401-09d5fd124f6a",
+          "path": "[ Workspace name + username do clerk]",
           "options": {}
         },
         "type": "n8n-nodes-base.webhook",
@@ -2815,7 +2815,7 @@
         ],
         "id": "0fc8989c-4307-47ff-b3c0-8a2103d683bb",
         "name": "Webhook",
-        "webhookId": "cd362a18-1ffd-45c3-8401-09d5fd124f6a"
+        "webhookId": "[ Workspace name + username do clerk]"
       },
       {
         "parameters": {

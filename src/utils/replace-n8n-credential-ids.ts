@@ -1,6 +1,7 @@
 import type { FastifyBaseLogger } from 'fastify'
 import * as fs from 'fs'
 import * as path from 'path'
+import { ENV } from '@/config/env'
 
 /**
  * Interface para mapear tipos de credenciais do N8N com seus IDs
@@ -55,19 +56,69 @@ export function loadN8NWorkflowTemplate(logger?: FastifyBaseLogger): any {
 }
 
 /**
+ * Normaliza uma string para usar como slug em URLs
+ * Remove acentos, caracteres especiais e espaços
+ */
+function normalizeToSlug(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // Remove acentos
+    .replace(/[^a-z0-9]+/g, '-') // Substitui caracteres especiais por hífen
+    .replace(/^-+|-+$/g, '') // Remove hífens do início e fim
+    .replace(/-+/g, '-') // Remove hífens duplicados
+}
+
+/**
+ * Gera as URLs de webhook baseado no nome do workspace e ID do Clerk
+ */
+function generateWebhookUrls(
+  workspaceName: string,
+  clerkId: string,
+  logger?: FastifyBaseLogger,
+): { webhookUrlDev: string; webhookUrlProd: string; webhookPath: string } {
+  const baseUrl = ENV.DEFAULT_N8N_URL || 'https://localhost:5678'
+
+  // Normaliza o workspace name e clerkId para criar o path do webhook
+  const normalizedWorkspace = normalizeToSlug(workspaceName)
+  const normalizedClerkId = normalizeToSlug(clerkId)
+
+  // Formato: workspace-name-clerkid
+  const webhookPath = `${normalizedWorkspace}-${normalizedClerkId}`
+
+  const webhookUrlDev = `${baseUrl}/webhook-test/${webhookPath}`
+  const webhookUrlProd = `${baseUrl}/webhook/${webhookPath}`
+
+  logger?.info(
+    {
+      workspaceName,
+      clerkId,
+      webhookPath,
+      webhookUrlDev,
+      webhookUrlProd,
+    },
+    'URLs de webhook geradas',
+  )
+
+  return { webhookUrlDev, webhookUrlProd, webhookPath }
+}
+
+/**
  * Substitui os placeholders de IDs de credenciais no template do N8N
  * @param template - Template do workflow N8N (objeto JSON)
  * @param credentials - Array de credenciais com id_n8n
  * @param workspaceName - Nome do workspace para substituir no template
+ * @param clerkId - ID do usuário no Clerk para gerar URLs de webhook únicas
  * @param logger - Logger do Fastify (opcional)
- * @returns Template com IDs substituídos
+ * @returns Template com IDs substituídos e URLs de webhook geradas
  */
 export function replaceN8NCredentialIds(
   template: any,
   credentials: Array<{ type: string; id_n8n: string | null }>,
   workspaceName: string,
+  clerkId: string,
   logger?: FastifyBaseLogger,
-): any {
+): { workflow: any; webhookUrlDev: string; webhookUrlProd: string; webhookPath: string } {
   try {
     // Criar mapa de tipos de credenciais do N8N → id_n8n
     const credentialMap = new Map<string, string>()
@@ -89,10 +140,23 @@ export function replaceN8NCredentialIds(
       }
     })
 
+    // Gerar URLs de webhook
+    const { webhookUrlDev, webhookUrlProd, webhookPath } = generateWebhookUrls(
+      workspaceName,
+      clerkId,
+      logger,
+    )
+
     // Converter template para string para fazer substituições
     let templateStr = JSON.stringify(template, null, 2)
 
-    // Substituir o nome do workspace no template
+    // Substituir o placeholder [Workspace name + username do clerk]
+    templateStr = templateStr.replace(
+      /\[Workspace name \+ username do clerk\]/gi,
+      webhookPath,
+    )
+
+    // Substituir o nome do workspace no template (nome principal do workflow)
     templateStr = templateStr.replace(
       /"name":\s*"WILLIAM\s*-\s*agencia\s*-\s*teste creator"/g,
       `"name": "${workspaceName}"`,
@@ -137,7 +201,14 @@ export function replaceN8NCredentialIds(
     })
 
     // Converter de volta para objeto JSON
-    return JSON.parse(templateStr)
+    const workflow = JSON.parse(templateStr)
+
+    return {
+      workflow,
+      webhookUrlDev,
+      webhookUrlProd,
+      webhookPath,
+    }
   } catch (error: any) {
     logger?.error(
       {

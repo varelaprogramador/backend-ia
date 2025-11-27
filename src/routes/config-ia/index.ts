@@ -408,28 +408,33 @@ export default async function (fastify: FastifyInstance) {
           );
         }
 
-        // Substituir os IDs das credenciais no template
-        const workflowWithIds = replaceN8NCredentialIds(
+        // Substituir os IDs das credenciais no template e gerar URLs de webhook
+        // Usar o ID do Clerk para garantir unicidade nos webhooks
+        const clerkId = user.id;
+        const { workflow, webhookUrlDev, webhookUrlProd, webhookPath } = replaceN8NCredentialIds(
           workflowTemplate,
           credentials,
           validatedData.nome,
+          clerkId,
           request.log
         );
 
         // Preparar dados para enviar ao N8N
         const workspaceDataForN8N = {
           workspaceName: validatedData.nome,
-          workflow: workflowWithIds, // Template do workflow com IDs substituídos
+          workflow, // Template do workflow com IDs substituídos
           prompt: validatedData.prompt,
           status: validatedData.status || "development",
-          webhookUrlDev: validatedData.webhookUrlDev,
-          webhookUrlProd: validatedData.webhookUrlProd,
+          webhookUrlDev, // URL gerada automaticamente
+          webhookUrlProd, // URL gerada automaticamente
+          webhookPath, // Path do webhook para referência
           user: {
             id: user.id,
             name:
               `${user.firstName || ""} ${user.lastName || ""}`.trim() ||
               user.username ||
               "Usuário",
+            clerkId,
           },
           credentials: credentials.map((cred) => ({
             id: cred.id,
@@ -1654,11 +1659,14 @@ export default async function (fastify: FastifyInstance) {
           );
         }
 
-        // Substituir os IDs das credenciais no template
-        const workflowWithIds = replaceN8NCredentialIds(
+        // Substituir os IDs das credenciais no template e gerar URLs de webhook
+        // Usar o ID do Clerk para garantir unicidade nos webhooks
+        const clerkId = configIA.user.id;
+        const { workflow, webhookUrlDev, webhookUrlProd, webhookPath } = replaceN8NCredentialIds(
           workflowTemplate,
           credentials,
           configIA.nome,
+          clerkId,
           request.log
         );
 
@@ -1666,17 +1674,19 @@ export default async function (fastify: FastifyInstance) {
         const workspaceData = {
           workspaceId: configIA.id,
           workspaceName: configIA.nome,
-          workflow: workflowWithIds, // Template do workflow com IDs substituídos
+          workflow, // Template do workflow com IDs substituídos
           prompt: configIA.prompt,
           status: configIA.status,
-          webhookUrlDev: configIA.webhookUrlDev,
-          webhookUrlProd: configIA.webhookUrlProd,
+          webhookUrlDev, // URL gerada automaticamente
+          webhookUrlProd, // URL gerada automaticamente
+          webhookPath, // Path do webhook para referência
           user: {
             id: configIA.user.id,
             name:
               `${configIA.user.firstName || ""} ${configIA.user.lastName || ""}`.trim() ||
               configIA.user.username ||
               "Usuário",
+            clerkId,
           },
           credentials: credentials.map((cred) => ({
             id: cred.id,
