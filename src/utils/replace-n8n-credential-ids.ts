@@ -150,9 +150,10 @@ export function replaceN8NCredentialIds(
     // Converter template para string para fazer substituições
     let templateStr = JSON.stringify(template, null, 2)
 
-    // Substituir o placeholder [Workspace name + username do clerk]
+    // Substituir o placeholder [ Workspace name + username do clerk]
+    // Nota: O template tem um espaço após o colchete de abertura
     templateStr = templateStr.replace(
-      /\[Workspace name \+ username do clerk\]/gi,
+      /\[\s*Workspace name \+ username do clerk\s*\]/gi,
       webhookPath,
     )
 
