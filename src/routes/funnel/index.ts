@@ -80,6 +80,32 @@ const querySchema = z.object({
 });
 
 // ========================================
+// FOLLOW-UP FLOW SCHEMAS
+// ========================================
+
+const followUpFlowStepSchema = z.object({
+  name: z.string().min(1),
+  order: z.number(),
+  delayDays: z.number().min(0).default(0),
+  delayHours: z.number().min(0).max(23).default(0),
+  messageTemplate: z.string().optional(),
+  isAutomatic: z.boolean().optional().default(false),
+  color: z.string().default("#6366f1"),
+  type: z.enum(["followup", "won", "lost"]).default("followup"),
+});
+
+const updateFollowUpFlowStepSchema = followUpFlowStepSchema.partial();
+
+const addLeadToFlowSchema = z.object({
+  leadId: z.string(),
+  stepId: z.string().optional(), // Se não fornecido, adiciona ao primeiro passo
+});
+
+const moveLeadInFlowSchema = z.object({
+  stepId: z.string(),
+});
+
+// ========================================
 // HELPER: Create default stages
 // ========================================
 
@@ -843,6 +869,659 @@ export default async function (fastify: FastifyInstance) {
         formatResponse({
           success: false,
           error: "Erro ao buscar histórico",
+        })
+      );
+    }
+  });
+
+  // ========================================
+  // FOLLOW-UP FLOW ROUTES
+  // ========================================
+
+  // GET /funnel/:funnelId/follow-up-flow/steps - Get flow steps
+  fastify.get("/:funnelId/follow-up-flow/steps", async (request, reply) => {
+    try {
+      const { funnelId } = request.params as { funnelId: string };
+
+      const steps = await db.followUpFlowStep.findMany({
+        where: { funnelId },
+        orderBy: { order: "asc" },
+      });
+
+      return formatResponse({
+        data: steps,
+        message: "Etapas do fluxo listadas",
+      });
+    } catch (error: any) {
+      logError("Error getting flow steps", error);
+      return reply.code(500).send(
+        formatResponse({
+          success: false,
+          error: "Erro ao buscar etapas do fluxo",
+        })
+      );
+    }
+  });
+
+  // POST /funnel/:funnelId/follow-up-flow/steps - Create flow step
+  fastify.post("/:funnelId/follow-up-flow/steps", async (request, reply) => {
+    try {
+      const { funnelId } = request.params as { funnelId: string };
+      const data = followUpFlowStepSchema.parse(request.body);
+
+      const step = await db.followUpFlowStep.create({
+        data: { funnelId, ...data },
+      });
+
+      logInfo("Flow step created", { stepId: step.id, funnelId });
+      return reply.code(201).send(
+        formatResponse({
+          data: step,
+          message: "Etapa criada com sucesso",
+        })
+      );
+    } catch (error: any) {
+      logError("Error creating flow step", error);
+      return reply.code(500).send(
+        formatResponse({
+          success: false,
+          error: "Erro ao criar etapa",
+        })
+      );
+    }
+  });
+
+  // PUT /funnel/follow-up-flow/steps/:stepId - Update flow step
+  fastify.put("/follow-up-flow/steps/:stepId", async (request, reply) => {
+    try {
+      const { stepId } = request.params as { stepId: string };
+      const data = updateFollowUpFlowStepSchema.parse(request.body);
+
+      const step = await db.followUpFlowStep.update({
+        where: { id: stepId },
+        data,
+      });
+
+      logInfo("Flow step updated", { stepId });
+      return formatResponse({
+        data: step,
+        message: "Etapa atualizada com sucesso",
+      });
+    } catch (error: any) {
+      logError("Error updating flow step", error);
+      return reply.code(500).send(
+        formatResponse({
+          success: false,
+          error: "Erro ao atualizar etapa",
+        })
+      );
+    }
+  });
+
+  // DELETE /funnel/follow-up-flow/steps/:stepId - Delete flow step
+  fastify.delete("/follow-up-flow/steps/:stepId", async (request, reply) => {
+    try {
+      const { stepId } = request.params as { stepId: string };
+
+      // Get step to check type
+      const step = await db.followUpFlowStep.findUnique({ where: { id: stepId } });
+      if (!step) {
+        return reply.code(404).send(
+          formatResponse({
+            success: false,
+            error: "Etapa não encontrada",
+          })
+        );
+      }
+
+      // Don't allow deleting won/lost steps
+      if (step.type === "won" || step.type === "lost") {
+        return reply.code(400).send(
+          formatResponse({
+            success: false,
+            error: "Não é permitido excluir etapas de ganho ou perdido",
+          })
+        );
+      }
+
+      // Move leads to first follow-up step before deleting
+      const firstStep = await db.followUpFlowStep.findFirst({
+        where: { funnelId: step.funnelId, type: "followup", id: { not: stepId } },
+        orderBy: { order: "asc" },
+      });
+
+      if (firstStep) {
+        await db.leadInFollowUpFlow.updateMany({
+          where: { currentStepId: stepId },
+          data: { currentStepId: firstStep.id },
+        });
+      }
+
+      await db.followUpFlowStep.delete({ where: { id: stepId } });
+
+      logInfo("Flow step deleted", { stepId });
+      return formatResponse({
+        message: "Etapa excluída com sucesso",
+      });
+    } catch (error: any) {
+      logError("Error deleting flow step", error);
+      return reply.code(500).send(
+        formatResponse({
+          success: false,
+          error: "Erro ao excluir etapa",
+        })
+      );
+    }
+  });
+
+  // POST /funnel/:funnelId/follow-up-flow/initialize - Initialize default flow steps
+  fastify.post("/:funnelId/follow-up-flow/initialize", async (request, reply) => {
+    try {
+      const { funnelId } = request.params as { funnelId: string };
+
+      // Check if steps already exist
+      const existingSteps = await db.followUpFlowStep.count({ where: { funnelId } });
+      if (existingSteps > 0) {
+        return reply.code(400).send(
+          formatResponse({
+            success: false,
+            error: "Fluxo já foi inicializado",
+          })
+        );
+      }
+
+      // Create default steps
+      const defaultSteps = [
+        { name: "1º Contato", order: 0, delayDays: 0, delayHours: 0, isAutomatic: false, color: "#3b82f6", type: "followup" },
+        { name: "Follow-up 3 dias", order: 1, delayDays: 3, delayHours: 0, isAutomatic: true, color: "#8b5cf6", type: "followup" },
+        { name: "Follow-up 7 dias", order: 2, delayDays: 7, delayHours: 0, isAutomatic: true, color: "#f59e0b", type: "followup" },
+        { name: "Último contato", order: 3, delayDays: 1, delayHours: 0, isAutomatic: true, color: "#ef4444", type: "followup" },
+        { name: "Ganho", order: 100, delayDays: 0, delayHours: 0, isAutomatic: false, color: "#22c55e", type: "won" },
+        { name: "Perdido", order: 101, delayDays: 0, delayHours: 0, isAutomatic: false, color: "#dc2626", type: "lost" },
+      ];
+
+      await db.followUpFlowStep.createMany({
+        data: defaultSteps.map((step) => ({ funnelId, ...step })),
+      });
+
+      const steps = await db.followUpFlowStep.findMany({
+        where: { funnelId },
+        orderBy: { order: "asc" },
+      });
+
+      logInfo("Flow initialized", { funnelId, stepsCount: steps.length });
+      return reply.code(201).send(
+        formatResponse({
+          data: steps,
+          message: "Fluxo inicializado com sucesso",
+        })
+      );
+    } catch (error: any) {
+      logError("Error initializing flow", error);
+      return reply.code(500).send(
+        formatResponse({
+          success: false,
+          error: "Erro ao inicializar fluxo",
+        })
+      );
+    }
+  });
+
+  // GET /funnel/:funnelId/follow-up-flow/leads - Get leads in flow
+  fastify.get("/:funnelId/follow-up-flow/leads", async (request, reply) => {
+    try {
+      const { funnelId } = request.params as { funnelId: string };
+
+      const leadsInFlow = await db.leadInFollowUpFlow.findMany({
+        where: { funnelId },
+        include: {
+          lead: true,
+          currentStep: true,
+        },
+        orderBy: { createdAt: "desc" },
+      });
+
+      return formatResponse({
+        data: leadsInFlow,
+        message: "Leads no fluxo listados",
+      });
+    } catch (error: any) {
+      logError("Error getting leads in flow", error);
+      return reply.code(500).send(
+        formatResponse({
+          success: false,
+          error: "Erro ao buscar leads no fluxo",
+        })
+      );
+    }
+  });
+
+  // POST /funnel/:funnelId/follow-up-flow/leads - Add lead to flow
+  fastify.post("/:funnelId/follow-up-flow/leads", async (request, reply) => {
+    try {
+      const { funnelId } = request.params as { funnelId: string };
+      const { leadId, stepId } = addLeadToFlowSchema.parse(request.body);
+
+      // Check if lead exists
+      const lead = await db.funnelLead.findUnique({ where: { id: leadId } });
+      if (!lead) {
+        return reply.code(404).send(
+          formatResponse({
+            success: false,
+            error: "Lead não encontrado",
+          })
+        );
+      }
+
+      // Check if lead is already in flow
+      const existingEntry = await db.leadInFollowUpFlow.findUnique({
+        where: { leadId_funnelId: { leadId, funnelId } },
+      });
+      if (existingEntry) {
+        return reply.code(400).send(
+          formatResponse({
+            success: false,
+            error: "Lead já está no fluxo de follow-up",
+          })
+        );
+      }
+
+      // Get target step (first step if not provided)
+      let targetStepId = stepId;
+      if (!targetStepId) {
+        const firstStep = await db.followUpFlowStep.findFirst({
+          where: { funnelId, type: "followup" },
+          orderBy: { order: "asc" },
+        });
+        if (!firstStep) {
+          return reply.code(400).send(
+            formatResponse({
+              success: false,
+              error: "Fluxo não possui etapas. Inicialize o fluxo primeiro.",
+            })
+          );
+        }
+        targetStepId = firstStep.id;
+      }
+
+      // Get step to calculate next follow-up date
+      const step = await db.followUpFlowStep.findUnique({ where: { id: targetStepId } });
+      if (!step) {
+        return reply.code(404).send(
+          formatResponse({
+            success: false,
+            error: "Etapa não encontrada",
+          })
+        );
+      }
+
+      // Calculate next follow-up date
+      const nextFollowUpAt = new Date();
+      nextFollowUpAt.setDate(nextFollowUpAt.getDate() + step.delayDays);
+      nextFollowUpAt.setHours(nextFollowUpAt.getHours() + step.delayHours);
+
+      const leadInFlow = await db.leadInFollowUpFlow.create({
+        data: {
+          leadId,
+          funnelId,
+          currentStepId: targetStepId,
+          nextFollowUpAt: step.delayDays > 0 || step.delayHours > 0 ? nextFollowUpAt : null,
+        },
+        include: {
+          lead: true,
+          currentStep: true,
+        },
+      });
+
+      logInfo("Lead added to flow", { leadId, funnelId, stepId: targetStepId });
+      return reply.code(201).send(
+        formatResponse({
+          data: leadInFlow,
+          message: "Lead adicionado ao fluxo com sucesso",
+        })
+      );
+    } catch (error: any) {
+      logError("Error adding lead to flow", error);
+      return reply.code(500).send(
+        formatResponse({
+          success: false,
+          error: "Erro ao adicionar lead ao fluxo",
+        })
+      );
+    }
+  });
+
+  // PUT /funnel/follow-up-flow/leads/:leadFlowId/move - Move lead to different step
+  fastify.put("/follow-up-flow/leads/:leadFlowId/move", async (request, reply) => {
+    try {
+      const { leadFlowId } = request.params as { leadFlowId: string };
+      const { stepId } = moveLeadInFlowSchema.parse(request.body);
+
+      // Get step to calculate next follow-up date
+      const step = await db.followUpFlowStep.findUnique({ where: { id: stepId } });
+      if (!step) {
+        return reply.code(404).send(
+          formatResponse({
+            success: false,
+            error: "Etapa não encontrada",
+          })
+        );
+      }
+
+      // Calculate next follow-up date
+      const nextFollowUpAt = new Date();
+      nextFollowUpAt.setDate(nextFollowUpAt.getDate() + step.delayDays);
+      nextFollowUpAt.setHours(nextFollowUpAt.getHours() + step.delayHours);
+
+      // Determine status based on step type
+      let status = "active";
+      let completedAt = null;
+      if (step.type === "won") {
+        status = "completed";
+        completedAt = new Date();
+      } else if (step.type === "lost") {
+        status = "lost";
+        completedAt = new Date();
+      }
+
+      const leadInFlow = await db.leadInFollowUpFlow.update({
+        where: { id: leadFlowId },
+        data: {
+          currentStepId: stepId,
+          nextFollowUpAt: step.type === "followup" && (step.delayDays > 0 || step.delayHours > 0) ? nextFollowUpAt : null,
+          status,
+          completedAt,
+        },
+        include: {
+          lead: true,
+          currentStep: true,
+        },
+      });
+
+      logInfo("Lead moved in flow", { leadFlowId, newStepId: stepId });
+      return formatResponse({
+        data: leadInFlow,
+        message: "Lead movido com sucesso",
+      });
+    } catch (error: any) {
+      logError("Error moving lead in flow", error);
+      return reply.code(500).send(
+        formatResponse({
+          success: false,
+          error: "Erro ao mover lead no fluxo",
+        })
+      );
+    }
+  });
+
+  // PATCH /funnel/follow-up-flow/leads/:leadFlowId/toggle-pause - Pause/resume lead in flow
+  fastify.patch("/follow-up-flow/leads/:leadFlowId/toggle-pause", async (request, reply) => {
+    try {
+      const { leadFlowId } = request.params as { leadFlowId: string };
+
+      const current = await db.leadInFollowUpFlow.findUnique({ where: { id: leadFlowId } });
+      if (!current) {
+        return reply.code(404).send(
+          formatResponse({
+            success: false,
+            error: "Lead não encontrado no fluxo",
+          })
+        );
+      }
+
+      // Can only pause/resume active or paused leads
+      if (current.status !== "active" && current.status !== "paused") {
+        return reply.code(400).send(
+          formatResponse({
+            success: false,
+            error: "Não é possível pausar/retomar um lead que já foi concluído",
+          })
+        );
+      }
+
+      const newStatus = current.status === "active" ? "paused" : "active";
+      const leadInFlow = await db.leadInFollowUpFlow.update({
+        where: { id: leadFlowId },
+        data: { status: newStatus },
+        include: {
+          lead: true,
+          currentStep: true,
+        },
+      });
+
+      logInfo("Lead pause toggled", { leadFlowId, newStatus });
+      return formatResponse({
+        data: leadInFlow,
+        message: `Lead ${newStatus === "paused" ? "pausado" : "retomado"} com sucesso`,
+      });
+    } catch (error: any) {
+      logError("Error toggling lead pause", error);
+      return reply.code(500).send(
+        formatResponse({
+          success: false,
+          error: "Erro ao pausar/retomar lead",
+        })
+      );
+    }
+  });
+
+  // DELETE /funnel/follow-up-flow/leads/:leadFlowId - Remove lead from flow
+  fastify.delete("/follow-up-flow/leads/:leadFlowId", async (request, reply) => {
+    try {
+      const { leadFlowId } = request.params as { leadFlowId: string };
+
+      await db.leadInFollowUpFlow.delete({ where: { id: leadFlowId } });
+
+      logInfo("Lead removed from flow", { leadFlowId });
+      return formatResponse({
+        message: "Lead removido do fluxo com sucesso",
+      });
+    } catch (error: any) {
+      logError("Error removing lead from flow", error);
+      return reply.code(500).send(
+        formatResponse({
+          success: false,
+          error: "Erro ao remover lead do fluxo",
+        })
+      );
+    }
+  });
+
+  // POST /funnel/follow-up-flow/leads/:leadFlowId/send - Send follow-up message
+  fastify.post("/follow-up-flow/leads/:leadFlowId/send", async (request, reply) => {
+    try {
+      const { leadFlowId } = request.params as { leadFlowId: string };
+
+      const leadInFlow = await db.leadInFollowUpFlow.findUnique({
+        where: { id: leadFlowId },
+        include: {
+          lead: true,
+          currentStep: true,
+          funnel: { include: { followUpAgent: true } },
+        },
+      });
+
+      if (!leadInFlow) {
+        return reply.code(404).send(
+          formatResponse({
+            success: false,
+            error: "Lead não encontrado no fluxo",
+          })
+        );
+      }
+
+      const agent = leadInFlow.funnel.followUpAgent;
+      if (!agent) {
+        return reply.code(400).send(
+          formatResponse({
+            success: false,
+            error: "Funil não possui agente de follow-up configurado",
+          })
+        );
+      }
+
+      // Create follow-up history entry
+      const message = leadInFlow.currentStep.messageTemplate || "Follow-up manual";
+      const followUp = await db.followUpHistory.create({
+        data: {
+          leadId: leadInFlow.leadId,
+          agentId: agent.id,
+          message,
+          status: "pending",
+        },
+        include: {
+          lead: { select: { name: true, phone: true, email: true } },
+        },
+      });
+
+      // Update lead in flow
+      await db.leadInFollowUpFlow.update({
+        where: { id: leadFlowId },
+        data: {
+          followUpCount: { increment: 1 },
+          lastFollowUpAt: new Date(),
+        },
+      });
+
+      // TODO: Integrate with OpenAI and Evolution API to send actual message
+
+      logInfo("Follow-up sent from flow", { leadFlowId, agentId: agent.id });
+      return formatResponse({
+        data: followUp,
+        message: "Follow-up enviado para processamento",
+      });
+    } catch (error: any) {
+      logError("Error sending follow-up from flow", error);
+      return reply.code(500).send(
+        formatResponse({
+          success: false,
+          error: "Erro ao enviar follow-up",
+        })
+      );
+    }
+  });
+
+  // PATCH /funnel/follow-up-flow/leads/:leadFlowId/won - Mark lead as won
+  fastify.patch("/follow-up-flow/leads/:leadFlowId/won", async (request, reply) => {
+    try {
+      const { leadFlowId } = request.params as { leadFlowId: string };
+
+      const current = await db.leadInFollowUpFlow.findUnique({
+        where: { id: leadFlowId },
+        include: { funnel: true },
+      });
+
+      if (!current) {
+        return reply.code(404).send(
+          formatResponse({
+            success: false,
+            error: "Lead não encontrado no fluxo",
+          })
+        );
+      }
+
+      // Find won step
+      const wonStep = await db.followUpFlowStep.findFirst({
+        where: { funnelId: current.funnelId, type: "won" },
+      });
+
+      if (!wonStep) {
+        return reply.code(400).send(
+          formatResponse({
+            success: false,
+            error: "Etapa de ganho não encontrada no fluxo",
+          })
+        );
+      }
+
+      const leadInFlow = await db.leadInFollowUpFlow.update({
+        where: { id: leadFlowId },
+        data: {
+          currentStepId: wonStep.id,
+          status: "completed",
+          completedAt: new Date(),
+          nextFollowUpAt: null,
+        },
+        include: {
+          lead: true,
+          currentStep: true,
+        },
+      });
+
+      logInfo("Lead marked as won in flow", { leadFlowId });
+      return formatResponse({
+        data: leadInFlow,
+        message: "Lead marcado como ganho",
+      });
+    } catch (error: any) {
+      logError("Error marking lead as won", error);
+      return reply.code(500).send(
+        formatResponse({
+          success: false,
+          error: "Erro ao marcar lead como ganho",
+        })
+      );
+    }
+  });
+
+  // PATCH /funnel/follow-up-flow/leads/:leadFlowId/lost - Mark lead as lost
+  fastify.patch("/follow-up-flow/leads/:leadFlowId/lost", async (request, reply) => {
+    try {
+      const { leadFlowId } = request.params as { leadFlowId: string };
+
+      const current = await db.leadInFollowUpFlow.findUnique({
+        where: { id: leadFlowId },
+        include: { funnel: true },
+      });
+
+      if (!current) {
+        return reply.code(404).send(
+          formatResponse({
+            success: false,
+            error: "Lead não encontrado no fluxo",
+          })
+        );
+      }
+
+      // Find lost step
+      const lostStep = await db.followUpFlowStep.findFirst({
+        where: { funnelId: current.funnelId, type: "lost" },
+      });
+
+      if (!lostStep) {
+        return reply.code(400).send(
+          formatResponse({
+            success: false,
+            error: "Etapa de perdido não encontrada no fluxo",
+          })
+        );
+      }
+
+      const leadInFlow = await db.leadInFollowUpFlow.update({
+        where: { id: leadFlowId },
+        data: {
+          currentStepId: lostStep.id,
+          status: "lost",
+          completedAt: new Date(),
+          nextFollowUpAt: null,
+        },
+        include: {
+          lead: true,
+          currentStep: true,
+        },
+      });
+
+      logInfo("Lead marked as lost in flow", { leadFlowId });
+      return formatResponse({
+        data: leadInFlow,
+        message: "Lead marcado como perdido",
+      });
+    } catch (error: any) {
+      logError("Error marking lead as lost", error);
+      return reply.code(500).send(
+        formatResponse({
+          success: false,
+          error: "Erro ao marcar lead como perdido",
         })
       );
     }

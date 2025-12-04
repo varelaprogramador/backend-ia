@@ -358,9 +358,11 @@ model Funnel {
   updatedAt   DateTime @updatedAt
 
   // Relações
-  stages       FunnelStage[]
-  leads        FunnelLead[]
-  followUpAgent FollowUpAgent?
+  stages           FunnelStage[]
+  leads            FunnelLead[]
+  followUpAgent    FollowUpAgent?
+  followUpFlowSteps FollowUpFlowStep[]
+  leadsInFlow      LeadInFollowUpFlow[]
 
   @@index([userId])
   @@index([isActive])
@@ -418,6 +420,9 @@ model FunnelLead {
 
   // Histórico de follow-ups
   followUps    FollowUpHistory[]
+
+  // Fluxo de follow-up
+  inFollowUpFlow LeadInFollowUpFlow?
 
   @@index([funnelId])
   @@index([stageId])
@@ -503,4 +508,62 @@ model FollowUpHistory {
   @@index([status])
   @@index([sentAt])
   @@map("follow_up_history")
+}
+
+// ========================================
+// FOLLOW-UP FLOW (Kanban de Follow-up)
+// ========================================
+
+model FollowUpFlowStep {
+  id              String   @id @default(cuid())
+  funnelId        String
+  funnel          Funnel   @relation(fields: [funnelId], references: [id], onDelete: Cascade)
+
+  name            String
+  order           Int      // Ordem de exibição
+  delayDays       Int      @default(0) // Dias de espera antes do próximo follow-up
+  delayHours      Int      @default(0) // Horas de espera
+  messageTemplate String?  // Template de mensagem para este passo
+  isAutomatic     Boolean  @default(false) // Se o follow-up é automático
+  color           String   @default("#6366f1")
+  type            String   @default("followup") // followup, won, lost
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Leads neste passo
+  leadsInFlow     LeadInFollowUpFlow[]
+
+  @@index([funnelId])
+  @@index([order])
+  @@map("follow_up_flow_steps")
+}
+
+model LeadInFollowUpFlow {
+  id              String   @id @default(cuid())
+  leadId          String   @unique
+  lead            FunnelLead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  funnelId        String
+  funnel          Funnel   @relation(fields: [funnelId], references: [id], onDelete: Cascade)
+  currentStepId   String
+  currentStep     FollowUpFlowStep @relation(fields: [currentStepId], references: [id], onDelete: Cascade)
+
+  // Status e controle
+  status          String   @default("active") // active, paused, completed, lost
+  followUpCount   Int      @default(0) // Quantos follow-ups foram enviados
+  nextFollowUpAt  DateTime? // Quando o próximo follow-up deve ser enviado
+  lastFollowUpAt  DateTime? // Último follow-up enviado
+
+  // Datas
+  enteredAt       DateTime @default(now()) // Quando entrou no fluxo
+  completedAt     DateTime? // Quando completou o fluxo (ganho ou perdido)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([leadId, funnelId]) // Um lead só pode estar em um fluxo por funil
+  @@index([funnelId])
+  @@index([currentStepId])
+  @@index([status])
+  @@index([nextFollowUpAt])
+  @@map("leads_in_follow_up_flow")
 }
