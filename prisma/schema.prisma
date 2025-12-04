@@ -49,6 +49,7 @@ model User {
   evolutionInstances EvolutionInstance[]
   deactivatedAgents  DeactivatedAgent[]
   credentials        Credential[]
+  funnels            Funnel[]
 
   @@map("users")
 }
@@ -340,4 +341,166 @@ enum CredentialType {
   CHATGPT
   N8N
   CUSTOM
+}
+
+// ========================================
+// FUNIL DE VENDAS (Sales Pipeline)
+// ========================================
+
+model Funnel {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relações
+  stages       FunnelStage[]
+  leads        FunnelLead[]
+  followUpAgent FollowUpAgent?
+
+  @@index([userId])
+  @@index([isActive])
+  @@map("funnels")
+}
+
+model FunnelStage {
+  id        String   @id @default(cuid())
+  funnelId  String
+  funnel    Funnel   @relation(fields: [funnelId], references: [id], onDelete: Cascade)
+  name      String
+  color     String   @default("#6366f1") // Cor do estágio
+  order     Int      // Ordem de exibição
+  isFixed   Boolean  @default(false) // Se é estágio fixo (Ganho/Perdido)
+  fixedType String?  // "won" ou "lost" para estágios fixos
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relações
+  leads FunnelLead[]
+
+  @@index([funnelId])
+  @@index([order])
+  @@map("funnel_stages")
+}
+
+model FunnelLead {
+  id           String   @id @default(cuid())
+  funnelId     String
+  funnel       Funnel   @relation(fields: [funnelId], references: [id], onDelete: Cascade)
+  stageId      String
+  stage        FunnelStage @relation(fields: [stageId], references: [id], onDelete: Cascade)
+
+  // Dados do lead
+  name         String
+  email        String?
+  phone        String?
+  value        Float?   @default(0) // Valor potencial do negócio
+  notes        String?
+  tags         String[] @default([])
+
+  // Metadados
+  source       String?  // Origem do lead (WhatsApp, Site, etc)
+  assignedTo   String?  // ID do responsável
+  priority     String   @default("medium") // low, medium, high
+
+  // Datas importantes
+  expectedCloseDate DateTime?
+  lastContactAt     DateTime?
+
+  // Controle
+  order        Int      @default(0) // Ordem dentro do estágio
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Histórico de follow-ups
+  followUps    FollowUpHistory[]
+
+  @@index([funnelId])
+  @@index([stageId])
+  @@index([phone])
+  @@index([email])
+  @@map("funnel_leads")
+}
+
+model FollowUpAgent {
+  id           String   @id @default(cuid())
+  funnelId     String   @unique
+  funnel       Funnel   @relation(fields: [funnelId], references: [id], onDelete: Cascade)
+
+  // Configurações do agente
+  name         String   @default("Agente de Follow-up")
+  isActive     Boolean  @default(false)
+
+  // Configurações de IA
+  model        String   @default("gpt-4o-mini") // Modelo ChatGPT
+  temperature  Float    @default(0.7)
+  maxTokens    Int      @default(500)
+
+  // Instruções personalizadas
+  systemPrompt String   // Instruções de sistema
+  followUpPrompt String? // Prompt específico para follow-up
+
+  // Configurações de comportamento
+  autoFollowUp Boolean  @default(false) // Enviar follow-up automático
+  followUpDelayHours Int @default(24) // Delay entre follow-ups
+  maxFollowUps Int      @default(3) // Máximo de follow-ups por lead
+
+  // Configurações de horário
+  workingHoursStart String? @default("09:00") // Horário início
+  workingHoursEnd   String? @default("18:00") // Horário fim
+  workingDays       Int[]   @default([1,2,3,4,5]) // Dias da semana (1=Segunda)
+  timezone          String  @default("America/Sao_Paulo")
+
+  // Integração com Evolution
+  evolutionInstanceId String?
+
+  // API Key do ChatGPT (pode usar credencial existente)
+  openaiApiKey String?
+  credentialId String? // Referência para Credential existente
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Histórico
+  followUpHistory FollowUpHistory[]
+
+  @@index([funnelId])
+  @@map("follow_up_agents")
+}
+
+model FollowUpHistory {
+  id           String   @id @default(cuid())
+  leadId       String
+  lead         FunnelLead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  agentId      String
+  agent        FollowUpAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  // Detalhes do follow-up
+  message      String   // Mensagem enviada
+  response     String?  // Resposta recebida
+  channel      String   @default("whatsapp") // whatsapp, email, sms
+  status       String   @default("sent") // pending, sent, delivered, read, responded, failed
+
+  // Metadados
+  sentAt       DateTime @default(now())
+  deliveredAt  DateTime?
+  readAt       DateTime?
+  respondedAt  DateTime?
+
+  // AI Metadata
+  aiModel      String?
+  promptUsed   String?
+  tokensUsed   Int?
+
+  createdAt    DateTime @default(now())
+
+  @@index([leadId])
+  @@index([agentId])
+  @@index([status])
+  @@index([sentAt])
+  @@map("follow_up_history")
 }
