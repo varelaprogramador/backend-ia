@@ -1,0 +1,70 @@
+# Dependências
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Arquivos temporários e de ambiente
+.env*
+!.env.example
+*.log
+logs/
+*.pid
+*.seed
+*.pid.lock
+*.tsbuildinfo
+*.tgz
+
+# Controle de versão
+.git/
+.gitignore
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Arquivos do sistema operacional
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Docker
+.dockerignore
+docker-compose*.yml
+
+# Testes e cobertura
+coverage/
+.nyc_output/
+*.lcov
+test/
+tests/
+__tests__/
+*.test.*
+*.spec.*
+
+# Documentação
+docs/
+README.md
+
+# Linters e configs
+.eslintrc*
+.prettierrc*
+
+# Pastas não usadas no build (mas cuidado!)
+dist/
+.next/
+
+# Bases locais e temporárias
+tmp/
+temp/
+dev.db
+*.db
+*.sqlite
+*.sqlite3

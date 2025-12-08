@@ -1,0 +1,569 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+// npx prisma generate - generate types
+// npx prisma db push - push changes to database
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                String    @id
+  firstName         String?
+  lastName          String?
+  imageUrl          String?
+  hasImage          Boolean   @default(false)
+  primaryEmailId    String?
+  emailAddresses    Json?
+  phoneNumbers      Json?
+  externalAccounts  Json?
+  publicMetadata    Json?
+  privateMetadata   Json?
+  unsafeMetadata    Json?
+  username          String?
+  passwordEnabled   Boolean   @default(false)
+  totpEnabled       Boolean   @default(false)
+  backupCodeEnabled Boolean   @default(false)
+  twoFactorEnabled  Boolean   @default(false)
+  banned            Boolean   @default(false)
+  locked            Boolean   @default(false)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  lastSignInAt      DateTime?
+  lastActiveAt      DateTime?
+
+  // Relações
+  credenciaisEvos    CredenciaisEvo[]
+  configIAs          ConfigIA[]
+  blockedContacts    BlockedContact[]
+  evolutionInstances EvolutionInstance[]
+  deactivatedAgents  DeactivatedAgent[]
+  credentials        Credential[]
+  funnels            Funnel[]
+
+  @@map("users")
+}
+
+model n8nChatMemory {
+  id        String   @id @default(cuid())
+  sessionId String
+  message   String
+  direction String // "input" ou "output"
+  createdAt DateTime @default(now())
+
+  // Evolution API fields (optional)
+  messageId    String?
+  instanceName String?
+  chatId       String?
+  senderId     String?
+  senderName   String?
+  messageType  String?
+  content      String?
+  mediaUrl     String?
+  mediaType    String?
+  mediaBase64  String? // Base64 content for images, videos, etc.
+  caption      String?
+  fileName     String?
+  timestamp    DateTime?
+  isGroup      Boolean?  @default(false)
+  status       String?
+  serverUrl    String?
+  apikey       String?
+  webhookData  Json?
+  processed    Boolean?  @default(false)
+
+  // AI Chat Memory fields
+  action         String? // AI action to be performed
+  input          String? // User input message (same as content)
+  system_message String? // System message for AI context
+
+  updatedAt DateTime @default(now())
+
+  @@index([sessionId])
+  @@index([chatId, timestamp])
+  @@index([senderId, timestamp])
+  @@index([messageType])
+  @@index([processed])
+  @@index([instanceName])
+  @@map("n8n_chat_memory")
+}
+
+model BlockedContact {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  remoteJid String   @unique // WhatsApp JID to block
+  reason    String? // Optional reason for blocking
+  blockedBy String? // Who blocked this contact
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([remoteJid])
+  @@index([userId])
+  @@map("blocked_contacts")
+}
+
+model MyMessages {
+  id        String   @id @default(cuid())
+  sessionId String
+  message   String
+  direction String // "sent" para suas mensagens, "received" para respostas da IA
+  createdAt DateTime @default(now())
+
+  // Campos do Evolution API (quando for sua mensagem enviada)
+  messageId    String?
+  instanceName String?
+  chatId       String?
+  senderId     String?
+  senderName   String?
+  messageType  String?
+  content      String?
+  mediaUrl     String?
+  mediaType    String?
+  mediaBase64  String?
+  caption      String?
+  fileName     String?
+  timestamp    DateTime?
+  isGroup      Boolean?  @default(false)
+  status       String?
+  serverUrl    String?
+  apikey       String?
+  webhookData  Json?
+
+  // Campos específicos para resposta da IA
+  aiResponse   String? // Quando direction = "received", contém apenas a resposta da IA
+  isAiResponse Boolean @default(false) // Identifica se é resposta da IA
+
+  @@index([sessionId])
+  @@index([chatId, timestamp])
+  @@index([senderId, timestamp])
+  @@index([direction])
+  @@index([isAiResponse])
+  @@map("my_messages")
+}
+
+model CredenciaisEvo {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  baseUrl   String
+  apiKey    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@map("credenciais_evo")
+}
+
+model ConfigIA {
+  id                 String              @id @default(cuid())
+  userId             String
+  user               User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  nome               String
+  prompt             String
+  status             String?
+  webhookUrlProd     String?
+  webhookUrlDev      String?
+
+  // Campos de integração com Kommo
+  kommoSubdomain     String?             // Subdomínio da conta Kommo
+  kommoAccessToken   String?             // Access token da API Kommo
+  kommodPipelineId   String?             // ID do pipeline onde o agente vai atuar
+
+  // Credenciais vinculadas
+  credentialIds      String[]            @default([]) // Array de IDs de credenciais
+
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  // Relação com Evolution Instances
+  evolutionInstances EvolutionInstance[]
+
+  // Relação com números desativados
+  deactivatedAgents  DeactivatedAgent[]
+
+  @@index([userId])
+  @@map("config_ia")
+}
+
+model EvolutionInstance {
+  id                   String    @id @default(cuid())
+  userId               String
+  user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  instanceName         String    @unique
+  displayName          String
+  connectionState      String    @default("DISCONNECTED") // CONNECTING, CONNECTED, DISCONNECTED, TIMEOUT, CLOSE
+  ownerJid             String?
+  profileName          String?
+  profilePictureUrl    String?
+  status               String    @default("active") // active, inactive, suspended
+  serverUrl            String?
+  webhookUrl           String?
+  webhookByEvents      Boolean?  @default(false)
+  webhookBase64        Boolean?  @default(false)
+  webhookEvents        Json?
+  isDefault            Boolean?  @default(false)
+  sendConnectionStatus Boolean?  @default(false)
+  chatwootAccountId    String?
+  chatwootToken        String?
+  chatwootUrl          String?
+  chatwootSignMsg      Boolean?  @default(false)
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  apiKey               String?
+
+  // Relação com ConfigIA (opcional)
+  configIAId           String?
+  configIA             ConfigIA? @relation(fields: [configIAId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([instanceName])
+  @@index([connectionState])
+  @@index([status])
+  @@index([configIAId])
+  @@map("evolution_instances")
+}
+
+model DeactivatedAgent {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  configIAId     String
+  configIA       ConfigIA @relation(fields: [configIAId], references: [id], onDelete: Cascade)
+  phoneNumber    String   // Número de telefone a ser bloqueado (formato: +5511999999999)
+  reason         String?  // Motivo do bloqueio (opcional)
+  isActive       Boolean  @default(true) // Se o bloqueio está ativo
+  blockedBy      String?  // Quem fez o bloqueio
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // Índices para performance
+  @@index([userId])
+  @@index([configIAId])
+  @@index([phoneNumber])
+  @@index([isActive])
+  @@unique([configIAId, phoneNumber]) // Um número pode ser bloqueado apenas uma vez por agente
+  @@map("deactivated_agents")
+}
+
+model SystemConfig {
+  id               String   @id @default(cuid())
+
+  // Branding
+  systemName       String   @default("AI System")
+  systemTitle      String   @default("AI Management Platform")
+  systemDescription String?
+
+  // SEO
+  seoTitle         String?
+  seoDescription   String?
+  seoKeywords      String?
+
+  // Visual Identity
+  logoUrl          String?
+  logoUrlDark      String?  // Logo para modo escuro
+  faviconUrl       String?
+  primaryColor     String?  @default("#000000")
+  secondaryColor   String?  @default("#ffffff")
+
+  // Contact & Links
+  contactEmail     String?
+  supportUrl       String?
+  websiteUrl       String?
+  privacyPolicyUrl String?
+  termsOfServiceUrl String?
+
+  // Social Media
+  facebookUrl      String?
+  twitterUrl       String?
+  linkedinUrl      String?
+  instagramUrl     String?
+
+  // System Settings
+  maintenanceMode  Boolean  @default(false)
+  allowRegistration Boolean @default(true)
+  version          String?  @default("1.0.0")
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@map("system_config")
+}
+
+model Credential {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  type      CredentialType
+
+  // Configurações de requisição
+  url       String
+  method    String   @default("POST")
+
+  // Headers customizados
+  authHeaderKey   String?  @default("X-N8N-API-KEY")
+  authHeaderValue String?
+  customHeaders   Json?    // Objeto JSON para headers adicionais
+
+  // Configurações de resposta
+  awaitResponse   Boolean  @default(false)
+  successModel    Json?    // Modelo de resposta esperado quando sucesso
+
+  // Dados da requisição
+  data      Json?
+
+  // ID da credencial no N8N
+  id_n8n    String?  @unique // ID retornado pelo N8N ao criar a credencial
+
+  // Metadados
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([type])
+  @@map("credentials")
+}
+
+enum CredentialType {
+  GOOGLE_CALENDAR
+  CHATGPT
+  N8N
+  CUSTOM
+}
+
+// ========================================
+// FUNIL DE VENDAS (Sales Pipeline)
+// ========================================
+
+model Funnel {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relações
+  stages           FunnelStage[]
+  leads            FunnelLead[]
+  followUpAgent    FollowUpAgent?
+  followUpFlowSteps FollowUpFlowStep[]
+  leadsInFlow      LeadInFollowUpFlow[]
+
+  @@index([userId])
+  @@index([isActive])
+  @@map("funnels")
+}
+
+model FunnelStage {
+  id        String   @id @default(cuid())
+  funnelId  String
+  funnel    Funnel   @relation(fields: [funnelId], references: [id], onDelete: Cascade)
+  name      String
+  color     String   @default("#6366f1") // Cor do estágio
+  order     Int      // Ordem de exibição
+  isFixed   Boolean  @default(false) // Se é estágio fixo (Ganho/Perdido)
+  fixedType String?  // "won" ou "lost" para estágios fixos
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relações
+  leads FunnelLead[]
+
+  @@index([funnelId])
+  @@index([order])
+  @@map("funnel_stages")
+}
+
+model FunnelLead {
+  id           String   @id @default(cuid())
+  funnelId     String
+  funnel       Funnel   @relation(fields: [funnelId], references: [id], onDelete: Cascade)
+  stageId      String
+  stage        FunnelStage @relation(fields: [stageId], references: [id], onDelete: Cascade)
+
+  // Dados do lead
+  name         String
+  email        String?
+  phone        String?
+  value        Float?   @default(0) // Valor potencial do negócio
+  notes        String?
+  tags         String[] @default([])
+
+  // Metadados
+  source       String?  // Origem do lead (WhatsApp, Site, etc)
+  assignedTo   String?  // ID do responsável
+  priority     String   @default("medium") // low, medium, high
+
+  // Datas importantes
+  expectedCloseDate DateTime?
+  lastContactAt     DateTime?
+
+  // Controle
+  order        Int      @default(0) // Ordem dentro do estágio
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Histórico de follow-ups
+  followUps    FollowUpHistory[]
+
+  // Fluxo de follow-up
+  inFollowUpFlow LeadInFollowUpFlow?
+
+  @@index([funnelId])
+  @@index([stageId])
+  @@index([phone])
+  @@index([email])
+  @@map("funnel_leads")
+}
+
+model FollowUpAgent {
+  id           String   @id @default(cuid())
+  funnelId     String   @unique
+  funnel       Funnel   @relation(fields: [funnelId], references: [id], onDelete: Cascade)
+
+  // Configurações do agente
+  name         String   @default("Agente de Follow-up")
+  isActive     Boolean  @default(false)
+
+  // Configurações de IA
+  model        String   @default("gpt-4o-mini") // Modelo ChatGPT
+  temperature  Float    @default(0.7)
+  maxTokens    Int      @default(500)
+
+  // Instruções personalizadas
+  systemPrompt String   // Instruções de sistema
+  followUpPrompt String? // Prompt específico para follow-up
+
+  // Configurações de comportamento
+  autoFollowUp Boolean  @default(false) // Enviar follow-up automático
+  followUpDelayHours Int @default(24) // Delay entre follow-ups
+  maxFollowUps Int      @default(3) // Máximo de follow-ups por lead
+
+  // Configurações de horário
+  workingHoursStart String? @default("09:00") // Horário início
+  workingHoursEnd   String? @default("18:00") // Horário fim
+  workingDays       Int[]   @default([1,2,3,4,5]) // Dias da semana (1=Segunda)
+  timezone          String  @default("America/Sao_Paulo")
+
+  // Integração com Evolution
+  evolutionInstanceId String?
+
+  // API Key do ChatGPT (pode usar credencial existente)
+  openaiApiKey String?
+  credentialId String? // Referência para Credential existente
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Histórico
+  followUpHistory FollowUpHistory[]
+
+  @@index([funnelId])
+  @@map("follow_up_agents")
+}
+
+model FollowUpHistory {
+  id           String   @id @default(cuid())
+  leadId       String
+  lead         FunnelLead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  agentId      String
+  agent        FollowUpAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  // Detalhes do follow-up
+  message      String   // Mensagem enviada
+  response     String?  // Resposta recebida
+  channel      String   @default("whatsapp") // whatsapp, email, sms
+  status       String   @default("sent") // pending, sent, delivered, read, responded, failed
+
+  // Metadados
+  sentAt       DateTime @default(now())
+  deliveredAt  DateTime?
+  readAt       DateTime?
+  respondedAt  DateTime?
+
+  // AI Metadata
+  aiModel      String?
+  promptUsed   String?
+  tokensUsed   Int?
+
+  createdAt    DateTime @default(now())
+
+  @@index([leadId])
+  @@index([agentId])
+  @@index([status])
+  @@index([sentAt])
+  @@map("follow_up_history")
+}
+
+// ========================================
+// FOLLOW-UP FLOW (Kanban de Follow-up)
+// ========================================
+
+model FollowUpFlowStep {
+  id              String   @id @default(cuid())
+  funnelId        String
+  funnel          Funnel   @relation(fields: [funnelId], references: [id], onDelete: Cascade)
+
+  name            String
+  order           Int      // Ordem de exibição
+  delayDays       Int      @default(0) // Dias de espera antes do próximo follow-up
+  delayHours      Int      @default(0) // Horas de espera
+  messageTemplate String?  // Template de mensagem para este passo
+  isAutomatic     Boolean  @default(false) // Se o follow-up é automático
+  color           String   @default("#6366f1")
+  type            String   @default("followup") // followup, won, lost
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Leads neste passo
+  leadsInFlow     LeadInFollowUpFlow[]
+
+  @@index([funnelId])
+  @@index([order])
+  @@map("follow_up_flow_steps")
+}
+
+model LeadInFollowUpFlow {
+  id              String   @id @default(cuid())
+  leadId          String   @unique
+  lead            FunnelLead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  funnelId        String
+  funnel          Funnel   @relation(fields: [funnelId], references: [id], onDelete: Cascade)
+  currentStepId   String
+  currentStep     FollowUpFlowStep @relation(fields: [currentStepId], references: [id], onDelete: Cascade)
+
+  // Status e controle
+  status          String   @default("active") // active, paused, completed, lost
+  followUpCount   Int      @default(0) // Quantos follow-ups foram enviados
+  nextFollowUpAt  DateTime? // Quando o próximo follow-up deve ser enviado
+  lastFollowUpAt  DateTime? // Último follow-up enviado
+
+  // Datas
+  enteredAt       DateTime @default(now()) // Quando entrou no fluxo
+  completedAt     DateTime? // Quando completou o fluxo (ganho ou perdido)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([leadId, funnelId]) // Um lead só pode estar em um fluxo por funil
+  @@index([funnelId])
+  @@index([currentStepId])
+  @@index([status])
+  @@index([nextFollowUpAt])
+  @@map("leads_in_follow_up_flow")
+}

@@ -1,0 +1,28 @@
+{
+  "name": "EAD10 - Backend",
+  "short_name": "EAD10 - Backend",
+  "description": "EAD10 - Backend",
+  "start_url": "/",
+  "scope": "/",
+  "lang": "pt-BR",
+  "dir": "ltr",
+  "orientation": "portrait",
+  "categories": ["lifestyle", "business", "ead10", "backend"],
+  "icons": [
+    {
+      "src": "/android-chrome-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/android-chrome-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ],
+  "theme_color": "#ffffff",
+  "background_color": "#ffffff",
+  "display": "standalone"
+}
