@@ -44,6 +44,13 @@ const leadSchema = z.object({
 
 const updateLeadSchema = leadSchema.partial();
 
+const leadSchemaWithWhatsApp = leadSchema.extend({
+  whatsappJid: z.string().optional(),
+  whatsappProfileName: z.string().optional(),
+  whatsappProfilePic: z.string().optional(),
+  evolutionInstanceId: z.string().optional(),
+});
+
 const moveLeadSchema = z.object({
   stageId: z.string(),
   order: z.number(),
@@ -103,6 +110,17 @@ const addLeadToFlowSchema = z.object({
 
 const moveLeadInFlowSchema = z.object({
   stepId: z.string(),
+});
+
+const createContactSchema = z.object({
+  contactType: z.enum(["message", "call", "email", "whatsapp", "manual"]).default("message"),
+  message: z.string().optional(),
+  response: z.string().optional(),
+  status: z.enum(["sent", "delivered", "read", "replied", "failed"]).default("sent"),
+  isAutomatic: z.boolean().default(false),
+  outcome: z.enum(["positive", "negative", "neutral", "no_response"]).optional(),
+  notes: z.string().optional(),
+  moveToNextStep: z.boolean().default(false), // Se deve mover para próxima etapa automaticamente
 });
 
 // ========================================
@@ -546,18 +564,32 @@ export default async function (fastify: FastifyInstance) {
   fastify.post("/:funnelId/lead", async (request, reply) => {
     try {
       const { funnelId } = request.params as { funnelId: string };
-      const data = leadSchema.parse(request.body);
+      const data = leadSchemaWithWhatsApp.parse(request.body);
 
       const lead = await db.funnelLead.create({
         data: {
           funnelId,
-          ...data,
+          stageId: data.stageId,
+          name: data.name,
+          email: data.email || null,
+          phone: data.phone || null,
+          value: data.value,
+          notes: data.notes || null,
+          tags: data.tags,
+          source: data.source || null,
+          assignedTo: data.assignedTo || null,
+          priority: data.priority,
           expectedCloseDate: data.expectedCloseDate ? new Date(data.expectedCloseDate) : null,
+          order: data.order,
+          whatsappJid: data.whatsappJid || null,
+          whatsappProfileName: data.whatsappProfileName || null,
+          whatsappProfilePic: data.whatsappProfilePic || null,
+          evolutionInstanceId: data.evolutionInstanceId || null,
         },
         include: { stage: true },
       });
 
-      logInfo("Lead created", { leadId: lead.id, funnelId });
+      logInfo("Lead created", { leadId: lead.id, funnelId, whatsappJid: data.whatsappJid });
       return reply.code(201).send(
         formatResponse({
           data: lead,
@@ -1160,17 +1192,27 @@ export default async function (fastify: FastifyInstance) {
       nextFollowUpAt.setDate(nextFollowUpAt.getDate() + step.delayDays);
       nextFollowUpAt.setHours(nextFollowUpAt.getHours() + step.delayHours);
 
-      const leadInFlow = await db.leadInFollowUpFlow.create({
-        data: {
-          leadId,
-          funnelId,
-          currentStepId: targetStepId,
-          nextFollowUpAt: step.delayDays > 0 || step.delayHours > 0 ? nextFollowUpAt : null,
-        },
-        include: {
-          lead: true,
-          currentStep: true,
-        },
+      // Use transaction to add to flow and mark as in follow-up flow
+      const leadInFlow = await db.$transaction(async (tx) => {
+        // Mark lead as in follow-up flow (removes from main Kanban)
+        await tx.funnelLead.update({
+          where: { id: leadId },
+          data: { isInFollowUpFlow: true },
+        });
+
+        // Add to flow
+        return tx.leadInFollowUpFlow.create({
+          data: {
+            leadId,
+            funnelId,
+            currentStepId: targetStepId,
+            nextFollowUpAt: step.delayDays > 0 || step.delayHours > 0 ? nextFollowUpAt : null,
+          },
+          include: {
+            lead: true,
+            currentStep: true,
+          },
+        });
       });
 
       logInfo("Lead added to flow", { leadId, funnelId, stepId: targetStepId });
@@ -1310,11 +1352,36 @@ export default async function (fastify: FastifyInstance) {
     try {
       const { leadFlowId } = request.params as { leadFlowId: string };
 
-      await db.leadInFollowUpFlow.delete({ where: { id: leadFlowId } });
+      // Get lead info before deleting
+      const leadInFlow = await db.leadInFollowUpFlow.findUnique({
+        where: { id: leadFlowId },
+        select: { leadId: true },
+      });
+
+      if (!leadInFlow) {
+        return reply.code(404).send(
+          formatResponse({
+            success: false,
+            error: "Lead não encontrado no fluxo",
+          })
+        );
+      }
+
+      // Use transaction to remove from flow and mark as back in main Kanban
+      await db.$transaction(async (tx) => {
+        // Remove from flow
+        await tx.leadInFollowUpFlow.delete({ where: { id: leadFlowId } });
+
+        // Mark lead as back in main Kanban
+        await tx.funnelLead.update({
+          where: { id: leadInFlow.leadId },
+          data: { isInFollowUpFlow: false },
+        });
+      });
 
       logInfo("Lead removed from flow", { leadFlowId });
       return formatResponse({
-        message: "Lead removido do fluxo com sucesso",
+        message: "Lead removido do fluxo e retornado ao Kanban principal",
       });
     } catch (error: any) {
       logError("Error removing lead from flow", error);
@@ -1522,6 +1589,658 @@ export default async function (fastify: FastifyInstance) {
         formatResponse({
           success: false,
           error: "Erro ao marcar lead como perdido",
+        })
+      );
+    }
+  });
+
+  // ========================================
+  // FOLLOW-UP FLOW CONTACTS ROUTES
+  // ========================================
+
+  // GET /funnel/follow-up-flow/leads/:leadFlowId/contacts - Get contacts history
+  fastify.get("/follow-up-flow/leads/:leadFlowId/contacts", async (request, reply) => {
+    try {
+      const { leadFlowId } = request.params as { leadFlowId: string };
+
+      const contacts = await db.followUpFlowContact.findMany({
+        where: { leadFlowId },
+        include: {
+          step: { select: { name: true, color: true } },
+        },
+        orderBy: { contactedAt: "desc" },
+      });
+
+      return formatResponse({
+        data: contacts,
+        message: "Histórico de contatos listado",
+      });
+    } catch (error: any) {
+      logError("Error getting contacts", error);
+      return reply.code(500).send(
+        formatResponse({
+          success: false,
+          error: "Erro ao buscar histórico de contatos",
+        })
+      );
+    }
+  });
+
+  // POST /funnel/follow-up-flow/leads/:leadFlowId/contacts - Register a contact
+  fastify.post("/follow-up-flow/leads/:leadFlowId/contacts", async (request, reply) => {
+    try {
+      const { leadFlowId } = request.params as { leadFlowId: string };
+      const data = createContactSchema.parse(request.body);
+
+      // Get lead in flow info
+      const leadInFlow = await db.leadInFollowUpFlow.findUnique({
+        where: { id: leadFlowId },
+        include: { currentStep: true },
+      });
+
+      if (!leadInFlow) {
+        return reply.code(404).send(
+          formatResponse({
+            success: false,
+            error: "Lead não encontrado no fluxo",
+          })
+        );
+      }
+
+      // Create contact record
+      const contact = await db.followUpFlowContact.create({
+        data: {
+          leadId: leadInFlow.leadId,
+          leadFlowId,
+          stepId: leadInFlow.currentStepId,
+          contactType: data.contactType,
+          message: data.message,
+          response: data.response,
+          status: data.status,
+          isAutomatic: data.isAutomatic,
+          outcome: data.outcome,
+          notes: data.notes,
+        },
+        include: {
+          step: { select: { name: true, color: true } },
+        },
+      });
+
+      // Update lead in flow with last contact date and increment count
+      await db.leadInFollowUpFlow.update({
+        where: { id: leadFlowId },
+        data: {
+          lastFollowUpAt: new Date(),
+          followUpCount: { increment: 1 },
+        },
+      });
+
+      // Update lead's last contact date
+      await db.funnelLead.update({
+        where: { id: leadInFlow.leadId },
+        data: { lastContactAt: new Date() },
+      });
+
+      // If moveToNextStep is true, move to next step automatically
+      if (data.moveToNextStep) {
+        const nextStep = await db.followUpFlowStep.findFirst({
+          where: {
+            funnelId: leadInFlow.funnelId,
+            order: { gt: leadInFlow.currentStep.order },
+            type: "followup",
+          },
+          orderBy: { order: "asc" },
+        });
+
+        if (nextStep) {
+          // Calculate next follow-up date
+          const nextFollowUpAt = new Date();
+          nextFollowUpAt.setDate(nextFollowUpAt.getDate() + nextStep.delayDays);
+          nextFollowUpAt.setHours(nextFollowUpAt.getHours() + nextStep.delayHours);
+
+          await db.leadInFollowUpFlow.update({
+            where: { id: leadFlowId },
+            data: {
+              currentStepId: nextStep.id,
+              nextFollowUpAt: nextStep.delayDays > 0 || nextStep.delayHours > 0 ? nextFollowUpAt : null,
+            },
+          });
+        }
+      }
+
+      logInfo("Contact registered", { leadFlowId, contactType: data.contactType });
+      return reply.code(201).send(
+        formatResponse({
+          data: contact,
+          message: "Contato registrado com sucesso",
+        })
+      );
+    } catch (error: any) {
+      logError("Error creating contact", error);
+      return reply.code(500).send(
+        formatResponse({
+          success: false,
+          error: "Erro ao registrar contato",
+        })
+      );
+    }
+  });
+
+  // PATCH /funnel/follow-up-flow/contacts/:contactId - Update contact (add response, etc)
+  fastify.patch("/follow-up-flow/contacts/:contactId", async (request, reply) => {
+    try {
+      const { contactId } = request.params as { contactId: string };
+      const data = request.body as {
+        response?: string;
+        status?: string;
+        outcome?: string;
+        notes?: string;
+      };
+
+      const contact = await db.followUpFlowContact.update({
+        where: { id: contactId },
+        data: {
+          ...data,
+          respondedAt: data.response ? new Date() : undefined,
+        },
+        include: {
+          step: { select: { name: true, color: true } },
+        },
+      });
+
+      logInfo("Contact updated", { contactId });
+      return formatResponse({
+        data: contact,
+        message: "Contato atualizado com sucesso",
+      });
+    } catch (error: any) {
+      logError("Error updating contact", error);
+      return reply.code(500).send(
+        formatResponse({
+          success: false,
+          error: "Erro ao atualizar contato",
+        })
+      );
+    }
+  });
+
+  // ========================================
+  // EVOLUTION API INTEGRATION ROUTES
+  // ========================================
+
+  // GET /funnel/evolution/:instanceId/contacts - Search contacts from Evolution API
+  fastify.get("/evolution/:instanceId/contacts", async (request, reply) => {
+    try {
+      const { instanceId } = request.params as { instanceId: string };
+      const { search } = request.query as { search?: string };
+
+      // Get instance info
+      const instance = await db.evolutionInstance.findUnique({
+        where: { id: instanceId },
+      });
+
+      if (!instance) {
+        return reply.code(404).send(
+          formatResponse({
+            success: false,
+            error: "Instância não encontrada",
+          })
+        );
+      }
+
+      if (instance.connectionState !== "CONNECTED") {
+        return reply.code(400).send(
+          formatResponse({
+            success: false,
+            error: "Instância não está conectada",
+          })
+        );
+      }
+
+      const serverUrl = instance.serverUrl || process.env.DEFAULT_EVOLUTION_URL || "";
+      const apiKey = instance.apiKey || process.env.DEFAULT_EVOLUTION_API_KEY || "";
+
+      if (!serverUrl || !apiKey) {
+        return reply.code(400).send(
+          formatResponse({
+            success: false,
+            error: "Credenciais da Evolution API não configuradas",
+          })
+        );
+      }
+
+      // Fetch contacts from Evolution API
+      const evolutionUrl = `${serverUrl.replace(/\/$/, "")}/chat/findContacts/${instance.instanceName}`;
+
+      logInfo("Fetching Evolution contacts", { evolutionUrl, search });
+
+      const response = await fetch(evolutionUrl, {
+        method: "POST",
+        headers: {
+          "apikey": apiKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          where: {}, // Get all contacts, filter locally
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        logError("Evolution API findContacts error", { status: response.status, error: errorText });
+        return reply.code(500).send(
+          formatResponse({
+            success: false,
+            error: `Erro na Evolution API: ${response.status} - ${errorText}`,
+          })
+        );
+      }
+
+      const contacts = await response.json();
+      logInfo("Evolution API raw response", { contactsCount: Array.isArray(contacts) ? contacts.length : 0 });
+
+      // Format contacts for frontend
+      let formattedContacts = Array.isArray(contacts) ? contacts.map((contact: any) => ({
+        id: contact.id,
+        remoteJid: contact.remoteJid || contact.id,
+        pushName: contact.pushName || contact.name || "Sem nome",
+        profilePictureUrl: contact.profilePictureUrl || null,
+        phoneNumber: (contact.remoteJid || contact.id || "").replace("@s.whatsapp.net", "").replace("@c.us", ""),
+      })) : [];
+
+      // Filter locally by search term (name or phone)
+      if (search) {
+        const searchLower = search.toLowerCase().replace(/\D/g, ""); // Remove non-digits for phone search
+        formattedContacts = formattedContacts.filter((contact: any) => {
+          const nameMatch = contact.pushName?.toLowerCase().includes(search.toLowerCase());
+          const phoneMatch = contact.phoneNumber?.includes(searchLower);
+          return nameMatch || phoneMatch;
+        });
+      }
+
+      logInfo("Contacts fetched", { instanceId, count: formattedContacts.length });
+      return formatResponse({
+        data: formattedContacts,
+        message: "Contatos buscados com sucesso",
+      });
+    } catch (error: any) {
+      logError("Error fetching Evolution contacts", error);
+      return reply.code(500).send(
+        formatResponse({
+          success: false,
+          error: "Erro ao buscar contatos da Evolution API",
+        })
+      );
+    }
+  });
+
+  // GET /funnel/evolution/:instanceId/chats - List all chats from Evolution API
+  fastify.get("/evolution/:instanceId/chats", async (request, reply) => {
+    try {
+      const { instanceId } = request.params as { instanceId: string };
+
+      // Get instance info
+      const instance = await db.evolutionInstance.findUnique({
+        where: { id: instanceId },
+      });
+
+      if (!instance) {
+        return reply.code(404).send(
+          formatResponse({
+            success: false,
+            error: "Instância não encontrada",
+          })
+        );
+      }
+
+      if (instance.connectionState !== "CONNECTED") {
+        return reply.code(400).send(
+          formatResponse({
+            success: false,
+            error: "Instância não está conectada",
+          })
+        );
+      }
+
+      const serverUrl = instance.serverUrl || process.env.DEFAULT_EVOLUTION_URL || "";
+      const apiKey = instance.apiKey || process.env.DEFAULT_EVOLUTION_API_KEY || "";
+
+      if (!serverUrl || !apiKey) {
+        return reply.code(400).send(
+          formatResponse({
+            success: false,
+            error: "Credenciais da Evolution API não configuradas",
+          })
+        );
+      }
+
+      // Fetch chats from Evolution API
+      const evolutionUrl = `${serverUrl.replace(/\/$/, "")}/chat/findChats/${instance.instanceName}`;
+
+      const response = await fetch(evolutionUrl, {
+        method: "POST",
+        headers: {
+          "apikey": apiKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+        signal: AbortSignal.timeout(15000),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        logError("Evolution API findChats error", { status: response.status, error: errorText });
+        return reply.code(response.status).send(
+          formatResponse({
+            success: false,
+            error: `Erro na Evolution API: ${response.status}`,
+          })
+        );
+      }
+
+      const chats = await response.json();
+
+      // Format chats for frontend (filter only individual chats, not groups)
+      const formattedChats = Array.isArray(chats) ? chats
+        .filter((chat: any) => !chat.isGroup && (chat.id || chat.remoteJid)?.includes("@s.whatsapp.net"))
+        .map((chat: any) => ({
+          id: chat.id || chat.remoteJid,
+          remoteJid: chat.remoteJid || chat.id,
+          pushName: chat.pushName || chat.name || "Sem nome",
+          profilePictureUrl: chat.profilePictureUrl || null,
+          phoneNumber: (chat.remoteJid || chat.id || "").replace("@s.whatsapp.net", "").replace("@c.us", ""),
+          lastMessageAt: chat.lastMessageAt || chat.updatedAt,
+          unreadCount: chat.unreadCount || 0,
+        })) : [];
+
+      logInfo("Chats fetched", { instanceId, count: formattedChats.length });
+      return formatResponse({
+        data: formattedChats,
+        message: "Conversas buscadas com sucesso",
+      });
+    } catch (error: any) {
+      logError("Error fetching Evolution chats", error);
+      return reply.code(500).send(
+        formatResponse({
+          success: false,
+          error: "Erro ao buscar conversas da Evolution API",
+        })
+      );
+    }
+  });
+
+  // GET /funnel/evolution/:instanceId/messages/:remoteJid - Get messages history from Evolution API
+  fastify.get("/evolution/:instanceId/messages/:remoteJid", async (request, reply) => {
+    try {
+      const { instanceId, remoteJid } = request.params as { instanceId: string; remoteJid: string };
+      const { limit = "50" } = request.query as { limit?: string };
+
+      // Get instance info
+      const instance = await db.evolutionInstance.findUnique({
+        where: { id: instanceId },
+      });
+
+      if (!instance) {
+        return reply.code(404).send(
+          formatResponse({
+            success: false,
+            error: "Instância não encontrada",
+          })
+        );
+      }
+
+      if (instance.connectionState !== "CONNECTED") {
+        return reply.code(400).send(
+          formatResponse({
+            success: false,
+            error: "Instância não está conectada",
+          })
+        );
+      }
+
+      const serverUrl = instance.serverUrl || process.env.DEFAULT_EVOLUTION_URL || "";
+      const apiKey = instance.apiKey || process.env.DEFAULT_EVOLUTION_API_KEY || "";
+
+      if (!serverUrl || !apiKey) {
+        return reply.code(400).send(
+          formatResponse({
+            success: false,
+            error: "Credenciais da Evolution API não configuradas",
+          })
+        );
+      }
+
+      // Decode remoteJid (may be URL encoded)
+      const decodedJid = decodeURIComponent(remoteJid);
+
+      // Fetch messages from Evolution API
+      const evolutionUrl = `${serverUrl.replace(/\/$/, "")}/chat/findMessages/${instance.instanceName}`;
+
+      const response = await fetch(evolutionUrl, {
+        method: "POST",
+        headers: {
+          "apikey": apiKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          where: {
+            key: {
+              remoteJid: decodedJid,
+            },
+          },
+          limit: parseInt(limit),
+        }),
+        signal: AbortSignal.timeout(30000),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        logError("Evolution API findMessages error", { status: response.status, error: errorText });
+        return reply.code(response.status).send(
+          formatResponse({
+            success: false,
+            error: `Erro na Evolution API: ${response.status}`,
+          })
+        );
+      }
+
+      const messagesData = await response.json();
+      const messages = messagesData.messages?.records || messagesData.messages || messagesData || [];
+
+      // Format messages for frontend
+      const formattedMessages = Array.isArray(messages) ? messages.map((msg: any) => ({
+        id: msg.key?.id || msg.id,
+        remoteJid: msg.key?.remoteJid || decodedJid,
+        fromMe: msg.key?.fromMe || false,
+        pushName: msg.pushName || null,
+        message: msg.message?.conversation ||
+                 msg.message?.extendedTextMessage?.text ||
+                 msg.message?.imageMessage?.caption ||
+                 msg.message?.videoMessage?.caption ||
+                 msg.message?.documentMessage?.caption ||
+                 (msg.message?.imageMessage ? "[Imagem]" : null) ||
+                 (msg.message?.videoMessage ? "[Vídeo]" : null) ||
+                 (msg.message?.audioMessage ? "[Áudio]" : null) ||
+                 (msg.message?.documentMessage ? "[Documento]" : null) ||
+                 (msg.message?.stickerMessage ? "[Sticker]" : null) ||
+                 msg.content ||
+                 "[Mensagem não suportada]",
+        messageType: msg.messageType ||
+                     (msg.message?.conversation ? "text" : null) ||
+                     (msg.message?.extendedTextMessage ? "text" : null) ||
+                     (msg.message?.imageMessage ? "image" : null) ||
+                     (msg.message?.videoMessage ? "video" : null) ||
+                     (msg.message?.audioMessage ? "audio" : null) ||
+                     (msg.message?.documentMessage ? "document" : null) ||
+                     "unknown",
+        timestamp: msg.messageTimestamp ? new Date(msg.messageTimestamp * 1000).toISOString() : msg.createdAt,
+        status: msg.status || "sent",
+      })).sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()) : [];
+
+      logInfo("Messages fetched", { instanceId, remoteJid: decodedJid, count: formattedMessages.length });
+      return formatResponse({
+        data: {
+          messages: formattedMessages,
+          remoteJid: decodedJid,
+          total: formattedMessages.length,
+        },
+        message: "Mensagens buscadas com sucesso",
+      });
+    } catch (error: any) {
+      logError("Error fetching Evolution messages", error);
+      return reply.code(500).send(
+        formatResponse({
+          success: false,
+          error: "Erro ao buscar mensagens da Evolution API",
+        })
+      );
+    }
+  });
+
+  // GET /funnel/lead/:leadId/whatsapp-history - Get WhatsApp history for a lead
+  fastify.get("/lead/:leadId/whatsapp-history", async (request, reply) => {
+    try {
+      const { leadId } = request.params as { leadId: string };
+      const { limit = "50" } = request.query as { limit?: string };
+
+      // Get lead with WhatsApp info
+      const lead = await db.funnelLead.findUnique({
+        where: { id: leadId },
+        select: {
+          id: true,
+          name: true,
+          whatsappJid: true,
+          evolutionInstanceId: true,
+        },
+      });
+
+      if (!lead) {
+        return reply.code(404).send(
+          formatResponse({
+            success: false,
+            error: "Lead não encontrado",
+          })
+        );
+      }
+
+      if (!lead.whatsappJid || !lead.evolutionInstanceId) {
+        return reply.code(400).send(
+          formatResponse({
+            success: false,
+            error: "Lead não possui WhatsApp vinculado",
+          })
+        );
+      }
+
+      // Get instance info
+      const instance = await db.evolutionInstance.findUnique({
+        where: { id: lead.evolutionInstanceId },
+      });
+
+      if (!instance) {
+        return reply.code(404).send(
+          formatResponse({
+            success: false,
+            error: "Instância Evolution não encontrada",
+          })
+        );
+      }
+
+      if (instance.connectionState !== "CONNECTED") {
+        return reply.code(400).send(
+          formatResponse({
+            success: false,
+            error: "Instância não está conectada",
+          })
+        );
+      }
+
+      const serverUrl = instance.serverUrl || process.env.DEFAULT_EVOLUTION_URL || "";
+      const apiKey = instance.apiKey || process.env.DEFAULT_EVOLUTION_API_KEY || "";
+
+      if (!serverUrl || !apiKey) {
+        return reply.code(400).send(
+          formatResponse({
+            success: false,
+            error: "Credenciais da Evolution API não configuradas",
+          })
+        );
+      }
+
+      // Fetch messages from Evolution API
+      const evolutionUrl = `${serverUrl.replace(/\/$/, "")}/chat/findMessages/${instance.instanceName}`;
+
+      const response = await fetch(evolutionUrl, {
+        method: "POST",
+        headers: {
+          "apikey": apiKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          where: {
+            key: {
+              remoteJid: lead.whatsappJid,
+            },
+          },
+          limit: parseInt(limit),
+        }),
+        signal: AbortSignal.timeout(30000),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        logError("Evolution API findMessages error", { status: response.status, error: errorText });
+        return reply.code(response.status).send(
+          formatResponse({
+            success: false,
+            error: `Erro na Evolution API: ${response.status}`,
+          })
+        );
+      }
+
+      const messagesData = await response.json();
+      const messages = messagesData.messages?.records || messagesData.messages || messagesData || [];
+
+      // Format messages for AI context
+      const formattedMessages = Array.isArray(messages) ? messages.map((msg: any) => ({
+        id: msg.key?.id || msg.id,
+        fromMe: msg.key?.fromMe || false,
+        sender: msg.key?.fromMe ? "Agente" : lead.name,
+        message: msg.message?.conversation ||
+                 msg.message?.extendedTextMessage?.text ||
+                 msg.message?.imageMessage?.caption ||
+                 msg.content ||
+                 "[Mensagem não suportada]",
+        messageType: msg.messageType || "text",
+        timestamp: msg.messageTimestamp ? new Date(msg.messageTimestamp * 1000).toISOString() : msg.createdAt,
+      })).sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()) : [];
+
+      // Generate context for AI
+      const conversationContext = formattedMessages
+        .map((msg: any) => `[${new Date(msg.timestamp).toLocaleString("pt-BR")}] ${msg.sender}: ${msg.message}`)
+        .join("\n");
+
+      logInfo("WhatsApp history fetched for lead", { leadId, messagesCount: formattedMessages.length });
+      return formatResponse({
+        data: {
+          lead: {
+            id: lead.id,
+            name: lead.name,
+            whatsappJid: lead.whatsappJid,
+          },
+          messages: formattedMessages,
+          total: formattedMessages.length,
+          conversationContext, // Ready for AI consumption
+        },
+        message: "Histórico de WhatsApp buscado com sucesso",
+      });
+    } catch (error: any) {
+      logError("Error fetching lead WhatsApp history", error);
+      return reply.code(500).send(
+        formatResponse({
+          success: false,
+          error: "Erro ao buscar histórico de WhatsApp do lead",
         })
       );
     }

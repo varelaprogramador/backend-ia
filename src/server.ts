@@ -17,6 +17,7 @@ import { allowedOrigins } from "@/config/allowed-origins";
 import { ENV } from "@/config/env";
 
 import { UserSyncService } from "@/services/user-sync";
+import { followUpFlowCronService } from "@/services/follow-up-flow-cron";
 import type { BatchManager, RealtimePayload } from "@/types/IO";
 import { logError, logInfo, logWarn } from "@/utils/logger";
 import { createFilteredFastifyLogger } from "@/utils/filtered-logger";
@@ -731,6 +732,9 @@ process.on("unhandledRejection", (reason, _promise) => {
 const userSyncService = UserSyncService.getInstance();
 let userSyncTask: cron.ScheduledTask | null = null;
 
+// Follow-up flow automation cron job
+let followUpFlowTask: cron.ScheduledTask | null = null;
+
 // Initialize user sync cron job
 const initUserSyncCron = () => {
   const cronSchedule = ENV.USER_SYNC_CRON_SCHEDULE || "0 */15 * * * *"; // Every 15 minutes by default (optimized)
@@ -758,6 +762,28 @@ const initUserSyncCron = () => {
   logInfo(`User sync cron job scheduled: ${cronSchedule}`);
 };
 
+// Initialize follow-up flow automation cron job
+const initFollowUpFlowCron = () => {
+  // Run every 5 minutes to check for leads that need to advance
+  const cronSchedule = "*/5 * * * *"; // Every 5 minutes
+
+  followUpFlowTask = cron.schedule(
+    cronSchedule,
+    async () => {
+      try {
+        await followUpFlowCronService.processFollowUpFlow();
+      } catch (error) {
+        logError("Follow-up flow cron job failed", error as Error);
+      }
+    },
+    {
+      timezone: "America/Sao_Paulo",
+    }
+  );
+
+  logInfo(`Follow-up flow cron job scheduled: ${cronSchedule}`);
+};
+
 // Enhanced graceful shutdown
 const signals = ["SIGINT", "SIGTERM"];
 let shuttingDown = false;
@@ -777,6 +803,10 @@ signals.forEach((signal) => {
       if (userSyncTask) {
         userSyncTask.stop();
         logInfo("⏱️ User sync cron job stopped");
+      }
+      if (followUpFlowTask) {
+        followUpFlowTask.stop();
+        logInfo("⏱️ Follow-up flow cron job stopped");
       }
 
       // Stop accepting new connections
@@ -821,6 +851,9 @@ app.listen(
     // Initialize user sync cron job
     initUserSyncCron();
 
+    // Initialize follow-up flow automation cron job
+    initFollowUpFlowCron();
+
     // Log cron job status and run initial sync if enabled
     if (userSyncTask) {
       logInfo("⏱️ User sync cron job started");
@@ -834,6 +867,11 @@ app.listen(
           logError("Initial user sync failed", error as Error);
         }
       }, 5000); // 5 seconds delay
+    }
+
+    // Log follow-up flow cron job status
+    if (followUpFlowTask) {
+      logInfo("⏱️ Follow-up flow cron job started (every 5 minutes)");
     }
 
     // Log server configuration

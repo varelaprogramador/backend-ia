@@ -409,14 +409,21 @@ model FunnelLead {
   assignedTo   String?  // ID do responsável
   priority     String   @default("medium") // low, medium, high
 
+  // Integração com WhatsApp (Evolution API)
+  whatsappJid       String?  // JID do contato no WhatsApp (ex: 5511999999999@s.whatsapp.net)
+  whatsappProfileName String? // Nome do perfil no WhatsApp
+  whatsappProfilePic  String? // URL da foto do perfil
+  evolutionInstanceId String? // ID da instância Evolution vinculada
+
   // Datas importantes
   expectedCloseDate DateTime?
   lastContactAt     DateTime?
 
-  // Controle
-  order        Int      @default(0) // Ordem dentro do estágio
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  // Controle de fluxo
+  isInFollowUpFlow Boolean  @default(false) // Se está no fluxo de follow-up (sai do Kanban principal)
+  order            Int      @default(0) // Ordem dentro do estágio
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   // Histórico de follow-ups
   followUps    FollowUpHistory[]
@@ -424,10 +431,15 @@ model FunnelLead {
   // Fluxo de follow-up
   inFollowUpFlow LeadInFollowUpFlow?
 
+  // Histórico de contatos no fluxo
+  flowContacts FollowUpFlowContact[]
+
   @@index([funnelId])
   @@index([stageId])
   @@index([phone])
   @@index([email])
+  @@index([whatsappJid])
+  @@index([isInFollowUpFlow])
   @@map("funnel_leads")
 }
 
@@ -534,6 +546,9 @@ model FollowUpFlowStep {
   // Leads neste passo
   leadsInFlow     LeadInFollowUpFlow[]
 
+  // Contatos feitos neste passo
+  contacts        FollowUpFlowContact[]
+
   @@index([funnelId])
   @@index([order])
   @@map("follow_up_flow_steps")
@@ -560,10 +575,47 @@ model LeadInFollowUpFlow {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
+  // Histórico de contatos
+  contacts        FollowUpFlowContact[]
+
   @@unique([leadId, funnelId]) // Um lead só pode estar em um fluxo por funil
   @@index([funnelId])
   @@index([currentStepId])
   @@index([status])
   @@index([nextFollowUpAt])
   @@map("leads_in_follow_up_flow")
+}
+
+// Histórico de contatos no fluxo de follow-up
+model FollowUpFlowContact {
+  id              String   @id @default(cuid())
+  leadId          String
+  lead            FunnelLead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  leadFlowId      String
+  leadInFlow      LeadInFollowUpFlow @relation(fields: [leadFlowId], references: [id], onDelete: Cascade)
+  stepId          String
+  step            FollowUpFlowStep @relation(fields: [stepId], references: [id], onDelete: Cascade)
+
+  // Detalhes do contato
+  contactType     String   @default("message") // message, call, email, whatsapp, manual
+  message         String?  // Mensagem enviada
+  response        String?  // Resposta do lead (se houver)
+  status          String   @default("sent") // sent, delivered, read, replied, failed
+  isAutomatic     Boolean  @default(false) // Se foi enviado automaticamente
+
+  // Resultado do contato
+  outcome         String?  // positive, negative, neutral, no_response
+  notes           String?  // Notas adicionais
+
+  // Datas
+  contactedAt     DateTime @default(now()) // Quando o contato foi feito
+  respondedAt     DateTime? // Quando o lead respondeu
+  createdAt       DateTime @default(now())
+
+  @@index([leadId])
+  @@index([leadFlowId])
+  @@index([stepId])
+  @@index([contactedAt])
+  @@index([status])
+  @@map("follow_up_flow_contacts")
 }
