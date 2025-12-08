@@ -7,9 +7,10 @@
   "description": "Backend da aplicação EAD10",
   "scripts": {
     "start": "cross-env NODE_ENV=production PORT=80 node .",
-    "build": "npm run clean && cross-env NODE_ENV=production PORT=80 tsc -p tsconfig.prod.json && tsc-alias && npm run copy:generated",
+    "build": "npm run clean && cross-env NODE_ENV=production PORT=80 tsc -p tsconfig.prod.json && tsc-alias && npm run copy:generated && npm run copy:json",
     "clean": "npx rimraf build",
     "copy:generated": "npx cpx2 \"src/generated/**/*\" build/generated",
+    "copy:json": "npx cpx2 \"src/utils/*.json\" build/utils",
     "dev": "cross-env NODE_ENV=development PORT=3333 tsx watch src/server.ts",
     "db:optimize-json": "node scripts/create-gin-indexes.js"
   },
