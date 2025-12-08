@@ -4,7 +4,6 @@ import axios from "axios";
 
 import { db } from "@/lib/db";
 import { sendSuccess, sendError } from "@/utils/response-formatter";
-import { authMiddleware } from "@/middlewares/auth";
 import { ENV } from "@/config/env";
 
 type CredentialType = "GOOGLE_CALENDAR" | "CHATGPT" | "N8N" | "CUSTOM";
@@ -223,13 +222,17 @@ function mapCredentialTypeToN8N(type: string): string {
 }
 
 export default async function (fastify: FastifyInstance) {
-  // Apply authentication middleware to all routes
-  fastify.addHook("preHandler", authMiddleware());
-
   // GET /credentials - List all credentials for the user
   fastify.get("/", async (req, reply) => {
     try {
-      const userId = req.user!.id;
+      const { userId } = req.query as { userId?: string };
+
+      if (!userId) {
+        return sendError(reply, {
+          status: StatusCodes.BAD_REQUEST,
+          error: "userId é obrigatório",
+        });
+      }
 
       const credentials = await db.credential.findMany({
         where: { userId },
@@ -253,10 +256,10 @@ export default async function (fastify: FastifyInstance) {
   fastify.get("/:id", async (req, reply) => {
     try {
       const { id } = req.params as { id: string };
-      const userId = req.user!.id;
+      const { userId } = req.query as { userId?: string };
 
       const credential = await db.credential.findFirst({
-        where: { id, userId },
+        where: userId ? { id, userId } : { id },
       });
 
       if (!credential) {
@@ -282,8 +285,8 @@ export default async function (fastify: FastifyInstance) {
   // POST /credentials - Create new credential
   fastify.post("/", async (req, reply) => {
     try {
-      const userId = req.user!.id;
       const {
+        userId,
         name,
         type,
         url,
@@ -294,9 +297,16 @@ export default async function (fastify: FastifyInstance) {
         awaitResponse = false,
         successModel,
         data,
-      } = req.body as CreateCredentialBody;
+      } = req.body as CreateCredentialBody & { userId: string };
 
       // Validações básicas
+      if (!userId) {
+        return sendError(reply, {
+          status: StatusCodes.BAD_REQUEST,
+          error: "userId é obrigatório",
+        });
+      }
+
       if (!name || !type) {
         return sendError(reply, {
           status: StatusCodes.BAD_REQUEST,
@@ -403,12 +413,11 @@ export default async function (fastify: FastifyInstance) {
   fastify.put("/:id", async (req, reply) => {
     try {
       const { id } = req.params as { id: string };
-      const userId = req.user!.id;
-      const body = req.body as UpdateCredentialBody;
+      const { userId, ...body } = req.body as UpdateCredentialBody & { userId?: string };
 
-      // Check if credential belongs to user
+      // Check if credential exists (optionally filter by userId)
       const existing = await db.credential.findFirst({
-        where: { id, userId },
+        where: userId ? { id, userId } : { id },
       });
 
       if (!existing) {
@@ -494,11 +503,11 @@ export default async function (fastify: FastifyInstance) {
   fastify.delete("/:id", async (req, reply) => {
     try {
       const { id } = req.params as { id: string };
-      const userId = req.user!.id;
+      const { userId } = req.query as { userId?: string };
 
-      // Check if credential belongs to user
+      // Check if credential exists (optionally filter by userId)
       const existing = await db.credential.findFirst({
-        where: { id, userId },
+        where: userId ? { id, userId } : { id },
       });
 
       if (!existing) {
@@ -529,11 +538,11 @@ export default async function (fastify: FastifyInstance) {
   fastify.post("/:id/resend", async (req, reply) => {
     try {
       const { id } = req.params as { id: string };
-      const userId = req.user!.id;
+      const { userId } = req.body as { userId?: string };
 
       // Fetch the credential
       const credential = await db.credential.findFirst({
-        where: { id, userId },
+        where: userId ? { id, userId } : { id },
       });
 
       if (!credential) {
@@ -628,11 +637,11 @@ export default async function (fastify: FastifyInstance) {
   fastify.post("/:id/test", async (req, reply) => {
     try {
       const { id } = req.params as { id: string };
-      const userId = req.user!.id;
+      const { userId } = req.body as { userId?: string };
 
       // Fetch the credential
       const credential = await db.credential.findFirst({
-        where: { id, userId },
+        where: userId ? { id, userId } : { id },
       });
 
       if (!credential) {
