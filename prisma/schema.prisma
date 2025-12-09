@@ -180,6 +180,13 @@ model ConfigIA {
   kommoAccessToken   String?             // Access token da API Kommo
   kommodPipelineId   String?             // ID do pipeline onde o agente vai atuar
 
+  // Campos de integração com RD Station
+  rdstationClientId      String?         // Client ID da aplicação RD Station
+  rdstationClientSecret  String?         // Client Secret da aplicação RD Station
+  rdstationAccessToken   String?         // Access token da API RD Station
+  rdstationRefreshToken  String?         // Refresh token para renovar o access token
+  rdstationCode          String?         // Código de autorização OAuth
+
   // Credenciais vinculadas
   credentialIds      String[]            @default([]) // Array de IDs de credenciais
 

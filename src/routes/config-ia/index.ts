@@ -20,6 +20,12 @@ const configIASchema = z.object({
   kommoSubdomain: z.string().optional().or(z.literal("")),
   kommoAccessToken: z.string().optional().or(z.literal("")),
   kommodPipelineId: z.string().optional().or(z.literal("")),
+  // Campos de integração com RD Station
+  rdstationClientId: z.string().optional().or(z.literal("")),
+  rdstationClientSecret: z.string().optional().or(z.literal("")),
+  rdstationAccessToken: z.string().optional().or(z.literal("")),
+  rdstationRefreshToken: z.string().optional().or(z.literal("")),
+  rdstationCode: z.string().optional().or(z.literal("")),
   // Credenciais vinculadas
   credentialIds: z.array(z.string()).optional().default([]),
 });
@@ -464,6 +470,17 @@ export default async function (fastify: FastifyInstance) {
                   pipelineId: validatedData.kommodPipelineId,
                 }
               : { enabled: false },
+          rdstation:
+            validatedData.rdstationClientId && validatedData.rdstationClientSecret
+              ? {
+                  enabled: true,
+                  clientId: validatedData.rdstationClientId,
+                  clientSecret: validatedData.rdstationClientSecret,
+                  accessToken: validatedData.rdstationAccessToken,
+                  refreshToken: validatedData.rdstationRefreshToken,
+                  code: validatedData.rdstationCode,
+                }
+              : { enabled: false },
         };
 
         // Enviar para o N8N
@@ -586,6 +603,11 @@ export default async function (fastify: FastifyInstance) {
           kommoSubdomain: validatedData.kommoSubdomain || null,
           kommoAccessToken: validatedData.kommoAccessToken || null,
           kommodPipelineId: validatedData.kommodPipelineId || null,
+          rdstationClientId: validatedData.rdstationClientId || null,
+          rdstationClientSecret: validatedData.rdstationClientSecret || null,
+          rdstationAccessToken: validatedData.rdstationAccessToken || null,
+          rdstationRefreshToken: validatedData.rdstationRefreshToken || null,
+          rdstationCode: validatedData.rdstationCode || null,
         };
 
         const config = await db.configIA.create({
@@ -675,7 +697,7 @@ export default async function (fastify: FastifyInstance) {
           );
         }
 
-        // Convert empty strings to null for URL fields and Kommo fields
+        // Convert empty strings to null for URL fields, Kommo and RD Station fields
         const dataToCreate = {
           ...validatedData,
           webhookUrlProd: validatedData.webhookUrlProd || null,
@@ -683,6 +705,11 @@ export default async function (fastify: FastifyInstance) {
           kommoSubdomain: validatedData.kommoSubdomain || null,
           kommoAccessToken: validatedData.kommoAccessToken || null,
           kommodPipelineId: validatedData.kommodPipelineId || null,
+          rdstationClientId: validatedData.rdstationClientId || null,
+          rdstationClientSecret: validatedData.rdstationClientSecret || null,
+          rdstationAccessToken: validatedData.rdstationAccessToken || null,
+          rdstationRefreshToken: validatedData.rdstationRefreshToken || null,
+          rdstationCode: validatedData.rdstationCode || null,
         };
 
         const config = await db.configIA.create({
@@ -764,7 +791,7 @@ export default async function (fastify: FastifyInstance) {
         const { id } = request.params as { id: string };
         const validatedData = updateConfigIASchema.parse(request.body);
 
-        // Convert empty strings to null for URL fields and Kommo fields
+        // Convert empty strings to null for URL fields, Kommo and RD Station fields
         const dataToUpdate: any = { ...validatedData };
         if ("webhookUrlProd" in dataToUpdate) {
           dataToUpdate.webhookUrlProd = dataToUpdate.webhookUrlProd || null;
@@ -780,6 +807,21 @@ export default async function (fastify: FastifyInstance) {
         }
         if ("kommodPipelineId" in dataToUpdate) {
           dataToUpdate.kommodPipelineId = dataToUpdate.kommodPipelineId || null;
+        }
+        if ("rdstationClientId" in dataToUpdate) {
+          dataToUpdate.rdstationClientId = dataToUpdate.rdstationClientId || null;
+        }
+        if ("rdstationClientSecret" in dataToUpdate) {
+          dataToUpdate.rdstationClientSecret = dataToUpdate.rdstationClientSecret || null;
+        }
+        if ("rdstationAccessToken" in dataToUpdate) {
+          dataToUpdate.rdstationAccessToken = dataToUpdate.rdstationAccessToken || null;
+        }
+        if ("rdstationRefreshToken" in dataToUpdate) {
+          dataToUpdate.rdstationRefreshToken = dataToUpdate.rdstationRefreshToken || null;
+        }
+        if ("rdstationCode" in dataToUpdate) {
+          dataToUpdate.rdstationCode = dataToUpdate.rdstationCode || null;
         }
 
         const config = await db.configIA.update({
@@ -1717,6 +1759,17 @@ export default async function (fastify: FastifyInstance) {
                   subdomain: configIA.kommoSubdomain,
                   accessToken: configIA.kommoAccessToken,
                   pipelineId: configIA.kommodPipelineId,
+                }
+              : { enabled: false },
+          rdstation:
+            configIA.rdstationClientId && configIA.rdstationClientSecret
+              ? {
+                  enabled: true,
+                  clientId: configIA.rdstationClientId,
+                  clientSecret: configIA.rdstationClientSecret,
+                  accessToken: configIA.rdstationAccessToken,
+                  refreshToken: configIA.rdstationRefreshToken,
+                  code: configIA.rdstationCode,
                 }
               : { enabled: false },
           createdAt: configIA.createdAt,
