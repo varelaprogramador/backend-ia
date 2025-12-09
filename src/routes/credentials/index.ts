@@ -331,8 +331,8 @@ export default async function (fastify: FastifyInstance) {
       const finalAuthHeaderKey =
         authHeaderKey || (type === "N8N" ? "X-N8N-API-KEY" : undefined);
 
-      // 1. Criar credencial no N8N primeiro (se configurado)
-      const id_n8n = await createCredentialInN8N(
+      // 1. Criar credencial no N8N primeiro (se API configurada)
+      let id_n8n = await createCredentialInN8N(
         {
           name,
           type,
@@ -341,8 +341,8 @@ export default async function (fastify: FastifyInstance) {
         req.log
       );
 
-      // 2. Criar credencial no banco de dados com o ID do N8N
-      const credential = await db.credential.create({
+      // 2. Criar credencial no banco de dados com o ID do N8N (se obtido)
+      let credential = await db.credential.create({
         data: {
           userId,
           name,
@@ -368,32 +368,90 @@ export default async function (fastify: FastifyInstance) {
         "Credencial criada com sucesso"
       );
 
-      // 3. Enviar dados ao webhook N8N (assíncrono, não bloqueia resposta)
-      sendToN8NWebhook(
-        {
-          action: "create",
-          credential: {
-            id: credential.id,
-            id_n8n: credential.id_n8n,
-            userId: credential.userId,
-            name: credential.name,
-            type: credential.type,
-            url: finalUrl, // URL resolvida
-            method: credential.method,
-            authHeaderKey: finalAuthHeaderKey,
-            isActive: credential.isActive,
-            createdAt: credential.createdAt,
-            data: credential.data,
+      // 3. Enviar dados ao webhook N8N (síncrono se awaitResponse for true)
+      if (awaitResponse) {
+        // Aguardar resposta do webhook para obter id_n8n
+        const webhookResult = await sendToN8NWebhook(
+          {
+            action: "create",
+            credential: {
+              id: credential.id,
+              id_n8n: credential.id_n8n,
+              userId: credential.userId,
+              name: credential.name,
+              type: credential.type,
+              url: finalUrl,
+              method: credential.method,
+              authHeaderKey: finalAuthHeaderKey,
+              isActive: credential.isActive,
+              createdAt: credential.createdAt,
+              data: credential.data,
+            },
           },
-        },
-        req.log
-      ).then((result) => {
-        if (!result.success) {
-          req.log.error("Falha ao enviar credencial ao webhook N8N (não crítico)");
+          req.log
+        );
+
+        // Se recebeu resposta com ID do N8N e ainda não temos, atualizar
+        if (webhookResult.success && webhookResult.data && !credential.id_n8n) {
+          const responseData = webhookResult.data;
+          const n8nCredential = Array.isArray(responseData) ? responseData[0] : responseData;
+
+          if (n8nCredential?.id) {
+            credential = await db.credential.update({
+              where: { id: credential.id },
+              data: { id_n8n: n8nCredential.id },
+            });
+
+            req.log.info(
+              {
+                id: credential.id,
+                id_n8n: n8nCredential.id,
+              },
+              "ID do N8N atualizado via webhook"
+            );
+          }
         }
-      }).catch((error) => {
-        req.log.error(error, "Erro ao enviar credencial ao webhook N8N (não crítico)");
-      });
+      } else {
+        // Envio assíncrono (não bloqueia resposta)
+        sendToN8NWebhook(
+          {
+            action: "create",
+            credential: {
+              id: credential.id,
+              id_n8n: credential.id_n8n,
+              userId: credential.userId,
+              name: credential.name,
+              type: credential.type,
+              url: finalUrl,
+              method: credential.method,
+              authHeaderKey: finalAuthHeaderKey,
+              isActive: credential.isActive,
+              createdAt: credential.createdAt,
+              data: credential.data,
+            },
+          },
+          req.log
+        ).then((result) => {
+          // Se recebeu ID do N8N na resposta, atualizar credencial
+          if (result.success && result.data) {
+            const responseData = result.data;
+            const n8nCredential = Array.isArray(responseData) ? responseData[0] : responseData;
+
+            if (n8nCredential?.id && !credential.id_n8n) {
+              db.credential.update({
+                where: { id: credential.id },
+                data: { id_n8n: n8nCredential.id },
+              }).then(() => {
+                req.log.info({ id: credential.id, id_n8n: n8nCredential.id }, "ID do N8N atualizado via webhook (assíncrono)");
+              }).catch((err) => {
+                req.log.error(err, "Erro ao atualizar id_n8n");
+              });
+            }
+          }
+        }).catch((error) => {
+          req.log.error(error, "Erro ao enviar credencial ao webhook N8N (não crítico)");
+        });
+      }
 
       return sendSuccess(reply, {
         status: StatusCodes.CREATED,
