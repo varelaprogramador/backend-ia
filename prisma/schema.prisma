@@ -199,6 +199,9 @@ model ConfigIA {
   // Relação com números desativados
   deactivatedAgents  DeactivatedAgent[]
 
+  // Relação com Funis de Vendas
+  funnels            Funnel[]
+
   @@index([userId])
   @@map("config_ia")
 }
@@ -364,6 +367,10 @@ model Funnel {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  // Vinculação com Agente/Workspace (opcional)
+  configIaId  String?
+  configIa    ConfigIA? @relation(fields: [configIaId], references: [id], onDelete: SetNull)
+
   // Relações
   stages           FunnelStage[]
   leads            FunnelLead[]
@@ -373,6 +380,7 @@ model Funnel {
 
   @@index([userId])
   @@index([isActive])
+  @@index([configIaId])
   @@map("funnels")
 }
 

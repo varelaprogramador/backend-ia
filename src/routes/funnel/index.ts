@@ -13,6 +13,7 @@ const funnelSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
   isActive: z.boolean().optional().default(true),
+  configIaId: z.string().optional().nullable(), // Vinculação com Agente/Workspace
 });
 
 const updateFunnelSchema = funnelSchema.partial().omit({ userId: true });
@@ -176,6 +177,7 @@ export default async function (fastify: FastifyInstance) {
             stages: { orderBy: { order: "asc" } },
             _count: { select: { leads: true } },
             followUpAgent: { select: { id: true, isActive: true, name: true } },
+            configIa: { select: { id: true, nome: true, status: true } }, // Incluir agente vinculado
           },
         }),
         db.funnel.count({ where }),
@@ -218,6 +220,7 @@ export default async function (fastify: FastifyInstance) {
           stages: { orderBy: { order: "asc" } },
           _count: { select: { leads: true } },
           followUpAgent: { select: { id: true, isActive: true, name: true } },
+          configIa: { select: { id: true, nome: true, status: true } }, // Incluir agente vinculado
         },
       });
 
@@ -257,6 +260,7 @@ export default async function (fastify: FastifyInstance) {
           },
           followUpAgent: true,
           _count: { select: { leads: true } },
+          configIa: { select: { id: true, nome: true, status: true } }, // Incluir agente vinculado
         },
       });
 
@@ -311,7 +315,10 @@ export default async function (fastify: FastifyInstance) {
       // Fetch updated funnel with stages
       const updatedFunnel = await db.funnel.findUnique({
         where: { id: funnel.id },
-        include: { stages: { orderBy: { order: "asc" } } },
+        include: {
+          stages: { orderBy: { order: "asc" } },
+          configIa: { select: { id: true, nome: true, status: true } },
+        },
       });
 
       logInfo("Funnel created", { funnelId: funnel.id, userId: data.userId });
@@ -350,7 +357,10 @@ export default async function (fastify: FastifyInstance) {
       const funnel = await db.funnel.update({
         where: { id },
         data,
-        include: { stages: { orderBy: { order: "asc" } } },
+        include: {
+          stages: { orderBy: { order: "asc" } },
+          configIa: { select: { id: true, nome: true, status: true } },
+        },
       });
 
       logInfo("Funnel updated", { funnelId: id });
