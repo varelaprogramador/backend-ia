@@ -3,190 +3,24 @@ import { StatusCodes } from "http-status-codes";
 import axios from "axios";
 import { db } from "@/lib/db";
 import { logError, logInfo } from "@/utils/logger";
-import { ENV } from "@/config/env";
-
-// RD Station OAuth Configuration
-const RDSTATION_TOKEN_URL = "https://api.rd.services/auth/token";
-const RDSTATION_USERINFO_URL = "https://api.rd.services/marketing/account_info";
-
-// URLs de redirecionamento
-const getFrontendUrl = () => {
-  return ENV.NODE_ENV === "production"
-    ? process.env.FRONTEND_URL || "https://app.seudominio.com"
-    : "http://localhost:3000";
-};
+// RD Station CRM API Configuration (plugcrm.net)
+// Documentação: https://ajuda.rdstation.com/s/article/Integrar-o-RD-Station-CRM-com-outras-plataformas-via-API
+const RDSTATION_CRM_BASE_URL = "https://plugcrm.net/api/v1";
+const RDSTATION_CRM_TOKEN_CHECK_URL = `${RDSTATION_CRM_BASE_URL}/token/check`;
 
 export default async function (fastify: FastifyInstance) {
   /**
-   * RD Station OAuth Callback
-   * Recebe o código de autorização e troca por access_token
-   *
-   * URL de callback para configurar no RD Station:
-   * - Produção: https://api.seudominio.com/oauth/rdstation/callback
-   * - Desenvolvimento: http://localhost:3333/oauth/rdstation/callback
+   * Validar e salvar token do RD Station CRM
+   * O RD Station CRM usa autenticação por Token (não OAuth)
+   * O token é obtido diretamente no painel do RD Station CRM
    */
-  fastify.get<{
-    Querystring: {
-      code?: string;
-      state?: string; // configIAId codificado
-      error?: string;
-      error_description?: string;
-    };
-  }>("/rdstation/callback", async (req, reply) => {
-    const { code, state, error, error_description } = req.query;
-    const frontendUrl = getFrontendUrl();
-
-    logInfo("RD Station OAuth callback received", {
-      hasCode: !!code,
-      hasState: !!state,
-      error,
-    });
-
-    // Se houve erro no OAuth
-    if (error) {
-      logError("RD Station OAuth error", {
-        error,
-        error_description,
-      });
-      return reply.redirect(
-        `${frontendUrl}/agents?error=rdstation_oauth_error&message=${encodeURIComponent(
-          error_description || error
-        )}`
-      );
-    }
-
-    // Validar parâmetros obrigatórios
-    if (!code) {
-      return reply.redirect(
-        `${frontendUrl}/agents?error=rdstation_missing_code&message=${encodeURIComponent(
-          "Código de autorização não recebido"
-        )}`
-      );
-    }
-
-    if (!state) {
-      return reply.redirect(
-        `${frontendUrl}/agents?error=rdstation_missing_state&message=${encodeURIComponent(
-          "Estado de configuração não recebido"
-        )}`
-      );
-    }
-
-    try {
-      // Decodificar state para obter configIAId
-      const configIAId = Buffer.from(state, "base64").toString("utf-8");
-
-      // Buscar ConfigIA para obter Client ID e Secret
-      const configIA = await db.configIA.findUnique({
-        where: { id: configIAId },
-        select: {
-          id: true,
-          nome: true,
-          rdstationClientId: true,
-          rdstationClientSecret: true,
-        },
-      });
-
-      if (!configIA) {
-        logError("ConfigIA not found for RD Station OAuth", { configIAId });
-        return reply.redirect(
-          `${frontendUrl}/agents?error=rdstation_config_not_found&message=${encodeURIComponent(
-            "Configuração de agente não encontrada"
-          )}`
-        );
-      }
-
-      if (!configIA.rdstationClientId || !configIA.rdstationClientSecret) {
-        logError("RD Station credentials not configured", { configIAId });
-        return reply.redirect(
-          `${frontendUrl}/agents/${configIAId}?error=rdstation_credentials_missing&message=${encodeURIComponent(
-            "Client ID ou Client Secret não configurados"
-          )}`
-        );
-      }
-
-      // Trocar código por access_token
-      logInfo("Exchanging code for access_token", { configIAId });
-
-      const tokenResponse = await axios.post(
-        RDSTATION_TOKEN_URL,
-        {
-          client_id: configIA.rdstationClientId,
-          client_secret: configIA.rdstationClientSecret,
-          code: code,
-        },
-        {
-          headers: {
-            "Content-Type": "application/json",
-          },
-          timeout: 15000,
-        }
-      );
-
-      const { access_token, refresh_token, expires_in } = tokenResponse.data;
-
-      if (!access_token) {
-        throw new Error("Access token não recebido do RD Station");
-      }
-
-      logInfo("RD Station access_token received", {
-        configIAId,
-        hasRefreshToken: !!refresh_token,
-        expiresIn: expires_in,
-      });
-
-      // Atualizar ConfigIA com os tokens
-      await db.configIA.update({
-        where: { id: configIAId },
-        data: {
-          rdstationAccessToken: access_token,
-          rdstationRefreshToken: refresh_token || null,
-          rdstationCode: code,
-        },
-      });
-
-      logInfo("RD Station tokens saved to ConfigIA", {
-        configIAId,
-        agentName: configIA.nome,
-      });
-
-      // Redirecionar para o frontend com sucesso
-      return reply.redirect(
-        `${frontendUrl}/agents/${configIAId}?success=rdstation_connected&message=${encodeURIComponent(
-          "RD Station conectado com sucesso!"
-        )}`
-      );
-    } catch (error: any) {
-      logError("Error in RD Station OAuth callback", {
-        error: error.message,
-        response: error.response?.data,
-        status: error.response?.status,
-      });
-
-      const errorMessage =
-        error.response?.data?.error_description ||
-        error.response?.data?.error ||
-        error.message ||
-        "Erro ao conectar com RD Station";
-
-      return reply.redirect(
-        `${frontendUrl}/agents?error=rdstation_token_error&message=${encodeURIComponent(
-          errorMessage
-        )}`
-      );
-    }
-  });
-
-  /**
-   * Iniciar fluxo OAuth do RD Station
-   * Gera a URL de autorização e redireciona o usuário
-   */
-  fastify.get<{
-    Querystring: {
+  fastify.post<{
+    Body: {
       configIAId: string;
+      token: string;
     };
-  }>("/rdstation/authorize", async (req, reply) => {
-    const { configIAId } = req.query;
+  }>("/rdstation-crm/connect", async (req, reply) => {
+    const { configIAId, token } = req.body;
 
     if (!configIAId) {
       return reply.code(StatusCodes.BAD_REQUEST).send({
@@ -195,69 +29,78 @@ export default async function (fastify: FastifyInstance) {
       });
     }
 
+    if (!token) {
+      return reply.code(StatusCodes.BAD_REQUEST).send({
+        success: false,
+        error: "Token é obrigatório",
+      });
+    }
+
     try {
-      // Buscar ConfigIA para obter Client ID
-      const configIA = await db.configIA.findUnique({
+      // Verificar se o token é válido
+      logInfo("Validating RD Station CRM token", { configIAId });
+
+      const tokenCheckResponse = await axios.get(RDSTATION_CRM_TOKEN_CHECK_URL, {
+        params: { token },
+        timeout: 15000,
+      });
+
+      // Se chegou aqui, o token é válido
+      logInfo("RD Station CRM token validated successfully", {
+        configIAId,
+        response: tokenCheckResponse.data,
+      });
+
+      // Salvar o token no ConfigIA
+      await db.configIA.update({
         where: { id: configIAId },
-        select: {
-          id: true,
-          rdstationClientId: true,
+        data: {
+          rdstationAccessToken: token,
+          // Limpar campos de OAuth que não são usados no CRM
+          rdstationRefreshToken: null,
+          rdstationCode: null,
         },
       });
 
-      if (!configIA) {
-        return reply.code(StatusCodes.NOT_FOUND).send({
-          success: false,
-          error: "Configuração de agente não encontrada",
-        });
-      }
+      logInfo("RD Station CRM token saved to ConfigIA", { configIAId });
 
-      if (!configIA.rdstationClientId) {
-        return reply.code(StatusCodes.BAD_REQUEST).send({
-          success: false,
-          error: "Client ID do RD Station não configurado",
-        });
-      }
-
-      // Gerar state codificado em base64
-      const state = Buffer.from(configIAId).toString("base64");
-
-      // Construir URL de callback
-      const backendUrl =
-        ENV.NODE_ENV === "production"
-          ? process.env.BACKEND_URL || "https://api.seudominio.com"
-          : `http://localhost:${ENV.PORT || 3333}`;
-
-      const redirectUri = `${backendUrl}/oauth/rdstation/callback`;
-
-      // Construir URL de autorização do RD Station
-      const authUrl = new URL("https://api.rd.services/auth/dialog");
-      authUrl.searchParams.set("client_id", configIA.rdstationClientId);
-      authUrl.searchParams.set("redirect_uri", redirectUri);
-      authUrl.searchParams.set("state", state);
-
-      logInfo("Redirecting to RD Station OAuth", {
-        configIAId,
-        redirectUri,
-        authUrl: authUrl.toString(),
+      return reply.code(StatusCodes.OK).send({
+        success: true,
+        message: "RD Station CRM conectado com sucesso!",
+        data: {
+          isConnected: true,
+          tokenInfo: tokenCheckResponse.data,
+        },
+      });
+    } catch (error: any) {
+      logError("Error validating RD Station CRM token", {
+        error: error.message,
+        response: error.response?.data,
+        status: error.response?.status,
       });
 
-      return reply.redirect(authUrl.toString());
-    } catch (error: any) {
-      logError("Error initiating RD Station OAuth", error);
+      // Verificar se é erro de token inválido
+      if (error.response?.status === 401 || error.response?.status === 403) {
+        return reply.code(StatusCodes.UNAUTHORIZED).send({
+          success: false,
+          error: "Token inválido. Verifique o token no painel do RD Station CRM.",
+        });
+      }
+
       return reply.code(StatusCodes.INTERNAL_SERVER_ERROR).send({
         success: false,
-        error: "Erro ao iniciar autenticação com RD Station",
+        error: "Erro ao validar token do RD Station CRM",
+        details: error.response?.data || error.message,
       });
     }
   });
 
   /**
-   * Verificar status da conexão com RD Station
+   * Verificar status da conexão com RD Station CRM
    */
   fastify.get<{
     Params: { configIAId: string };
-  }>("/rdstation/status/:configIAId", async (req, reply) => {
+  }>("/rdstation-crm/status/:configIAId", async (req, reply) => {
     const { configIAId } = req.params;
 
     try {
@@ -267,7 +110,6 @@ export default async function (fastify: FastifyInstance) {
           rdstationClientId: true,
           rdstationClientSecret: true,
           rdstationAccessToken: true,
-          rdstationRefreshToken: true,
         },
       });
 
@@ -278,136 +120,51 @@ export default async function (fastify: FastifyInstance) {
         });
       }
 
-      const hasCredentials =
-        !!configIA.rdstationClientId && !!configIA.rdstationClientSecret;
-      const isConnected = !!configIA.rdstationAccessToken;
+      const hasToken = !!configIA.rdstationAccessToken;
 
-      // Se conectado, verificar se o token ainda é válido
+      // Se tem token, verificar se ainda é válido
       let isTokenValid = false;
-      if (isConnected) {
+      let tokenInfo = null;
+
+      if (hasToken) {
         try {
-          await axios.get(RDSTATION_USERINFO_URL, {
-            headers: {
-              Authorization: `Bearer ${configIA.rdstationAccessToken}`,
-            },
+          const checkResponse = await axios.get(RDSTATION_CRM_TOKEN_CHECK_URL, {
+            params: { token: configIA.rdstationAccessToken },
             timeout: 10000,
           });
           isTokenValid = true;
+          tokenInfo = checkResponse.data;
         } catch (error: any) {
           // Token expirado ou inválido
           isTokenValid = false;
+          logInfo("RD Station CRM token is invalid or expired", { configIAId });
         }
       }
 
       return reply.code(StatusCodes.OK).send({
         success: true,
         data: {
-          hasCredentials,
-          isConnected,
+          isConnected: hasToken && isTokenValid,
+          hasToken,
           isTokenValid,
-          hasRefreshToken: !!configIA.rdstationRefreshToken,
+          tokenInfo,
         },
       });
     } catch (error: any) {
-      logError("Error checking RD Station status", error);
+      logError("Error checking RD Station CRM status", error);
       return reply.code(StatusCodes.INTERNAL_SERVER_ERROR).send({
         success: false,
-        error: "Erro ao verificar status do RD Station",
+        error: "Erro ao verificar status do RD Station CRM",
       });
     }
   });
 
   /**
-   * Renovar access_token usando refresh_token
-   */
-  fastify.post<{
-    Body: { configIAId: string };
-  }>("/rdstation/refresh", async (req, reply) => {
-    const { configIAId } = req.body;
-
-    if (!configIAId) {
-      return reply.code(StatusCodes.BAD_REQUEST).send({
-        success: false,
-        error: "configIAId é obrigatório",
-      });
-    }
-
-    try {
-      const configIA = await db.configIA.findUnique({
-        where: { id: configIAId },
-        select: {
-          rdstationClientId: true,
-          rdstationClientSecret: true,
-          rdstationRefreshToken: true,
-        },
-      });
-
-      if (!configIA) {
-        return reply.code(StatusCodes.NOT_FOUND).send({
-          success: false,
-          error: "Configuração não encontrada",
-        });
-      }
-
-      if (!configIA.rdstationRefreshToken) {
-        return reply.code(StatusCodes.BAD_REQUEST).send({
-          success: false,
-          error: "Refresh token não disponível. Reconecte com o RD Station.",
-        });
-      }
-
-      // Renovar token
-      const tokenResponse = await axios.post(
-        RDSTATION_TOKEN_URL,
-        {
-          client_id: configIA.rdstationClientId,
-          client_secret: configIA.rdstationClientSecret,
-          refresh_token: configIA.rdstationRefreshToken,
-        },
-        {
-          headers: {
-            "Content-Type": "application/json",
-          },
-          timeout: 15000,
-        }
-      );
-
-      const { access_token, refresh_token } = tokenResponse.data;
-
-      // Atualizar tokens
-      await db.configIA.update({
-        where: { id: configIAId },
-        data: {
-          rdstationAccessToken: access_token,
-          rdstationRefreshToken: refresh_token || configIA.rdstationRefreshToken,
-        },
-      });
-
-      logInfo("RD Station token refreshed", { configIAId });
-
-      return reply.code(StatusCodes.OK).send({
-        success: true,
-        message: "Token renovado com sucesso",
-      });
-    } catch (error: any) {
-      logError("Error refreshing RD Station token", {
-        error: error.message,
-        response: error.response?.data,
-      });
-
-      return reply.code(StatusCodes.INTERNAL_SERVER_ERROR).send({
-        success: false,
-        error: "Erro ao renovar token do RD Station",
-      });
-    }
-  });
-
-  /**
-   * Desconectar RD Station (limpar tokens)
+   * Desconectar RD Station CRM (limpar token)
    */
   fastify.delete<{
     Params: { configIAId: string };
-  }>("/rdstation/disconnect/:configIAId", async (req, reply) => {
+  }>("/rdstation-crm/disconnect/:configIAId", async (req, reply) => {
     const { configIAId } = req.params;
 
     try {
@@ -417,20 +174,437 @@ export default async function (fastify: FastifyInstance) {
           rdstationAccessToken: null,
           rdstationRefreshToken: null,
           rdstationCode: null,
+          rdstationClientId: null,
+          rdstationClientSecret: null,
         },
       });
 
-      logInfo("RD Station disconnected", { configIAId });
+      logInfo("RD Station CRM disconnected", { configIAId });
 
       return reply.code(StatusCodes.OK).send({
         success: true,
-        message: "RD Station desconectado com sucesso",
+        message: "RD Station CRM desconectado com sucesso",
       });
     } catch (error: any) {
-      logError("Error disconnecting RD Station", error);
+      logError("Error disconnecting RD Station CRM", error);
       return reply.code(StatusCodes.INTERNAL_SERVER_ERROR).send({
         success: false,
-        error: "Erro ao desconectar RD Station",
+        error: "Erro ao desconectar RD Station CRM",
+      });
+    }
+  });
+
+  /**
+   * Listar deals/oportunidades do RD Station CRM
+   */
+  fastify.get<{
+    Params: { configIAId: string };
+    Querystring: {
+      page?: number;
+      limit?: number;
+      deal_stage_id?: string;
+    };
+  }>("/rdstation-crm/deals/:configIAId", async (req, reply) => {
+    const { configIAId } = req.params;
+    const { page = 1, limit = 20, deal_stage_id } = req.query;
+
+    try {
+      const configIA = await db.configIA.findUnique({
+        where: { id: configIAId },
+        select: {
+          rdstationAccessToken: true,
+        },
+      });
+
+      if (!configIA?.rdstationAccessToken) {
+        return reply.code(StatusCodes.UNAUTHORIZED).send({
+          success: false,
+          error: "RD Station CRM não conectado",
+        });
+      }
+
+      const params: any = {
+        token: configIA.rdstationAccessToken,
+        page,
+        limit,
+      };
+
+      if (deal_stage_id) {
+        params.deal_stage_id = deal_stage_id;
+      }
+
+      const response = await axios.get(`${RDSTATION_CRM_BASE_URL}/deals`, {
+        params,
+        timeout: 15000,
+      });
+
+      return reply.code(StatusCodes.OK).send({
+        success: true,
+        data: response.data,
+      });
+    } catch (error: any) {
+      logError("Error fetching RD Station CRM deals", {
+        error: error.message,
+        response: error.response?.data,
+      });
+
+      if (error.response?.status === 401) {
+        return reply.code(StatusCodes.UNAUTHORIZED).send({
+          success: false,
+          error: "Token inválido ou expirado",
+        });
+      }
+
+      return reply.code(StatusCodes.INTERNAL_SERVER_ERROR).send({
+        success: false,
+        error: "Erro ao buscar oportunidades do RD Station CRM",
+      });
+    }
+  });
+
+  /**
+   * Criar deal/oportunidade no RD Station CRM
+   */
+  fastify.post<{
+    Params: { configIAId: string };
+    Body: {
+      name: string;
+      deal_stage_id?: string;
+      organization_id?: string;
+      contact_id?: string;
+      user_id?: string;
+      deal_value?: number;
+      deal_source_id?: string;
+      rating?: number;
+      win?: boolean;
+      prediction_date?: string;
+      custom_fields?: Record<string, any>;
+    };
+  }>("/rdstation-crm/deals/:configIAId", async (req, reply) => {
+    const { configIAId } = req.params;
+    const dealData = req.body;
+
+    if (!dealData.name) {
+      return reply.code(StatusCodes.BAD_REQUEST).send({
+        success: false,
+        error: "Nome da oportunidade é obrigatório",
+      });
+    }
+
+    try {
+      const configIA = await db.configIA.findUnique({
+        where: { id: configIAId },
+        select: {
+          rdstationAccessToken: true,
+        },
+      });
+
+      if (!configIA?.rdstationAccessToken) {
+        return reply.code(StatusCodes.UNAUTHORIZED).send({
+          success: false,
+          error: "RD Station CRM não conectado",
+        });
+      }
+
+      const response = await axios.post(
+        `${RDSTATION_CRM_BASE_URL}/deals`,
+        {
+          ...dealData,
+          token: configIA.rdstationAccessToken,
+        },
+        {
+          headers: {
+            "Content-Type": "application/json",
+          },
+          timeout: 15000,
+        }
+      );
+
+      logInfo("Deal created in RD Station CRM", {
+        configIAId,
+        dealId: response.data?.id,
+      });
+
+      return reply.code(StatusCodes.CREATED).send({
+        success: true,
+        data: response.data,
+      });
+    } catch (error: any) {
+      logError("Error creating RD Station CRM deal", {
+        error: error.message,
+        response: error.response?.data,
+      });
+
+      if (error.response?.status === 401) {
+        return reply.code(StatusCodes.UNAUTHORIZED).send({
+          success: false,
+          error: "Token inválido ou expirado",
+        });
+      }
+
+      return reply.code(StatusCodes.INTERNAL_SERVER_ERROR).send({
+        success: false,
+        error: "Erro ao criar oportunidade no RD Station CRM",
+        details: error.response?.data,
+      });
+    }
+  });
+
+  /**
+   * Listar contatos do RD Station CRM
+   */
+  fastify.get<{
+    Params: { configIAId: string };
+    Querystring: {
+      page?: number;
+      limit?: number;
+      q?: string;
+    };
+  }>("/rdstation-crm/contacts/:configIAId", async (req, reply) => {
+    const { configIAId } = req.params;
+    const { page = 1, limit = 20, q } = req.query;
+
+    try {
+      const configIA = await db.configIA.findUnique({
+        where: { id: configIAId },
+        select: {
+          rdstationAccessToken: true,
+        },
+      });
+
+      if (!configIA?.rdstationAccessToken) {
+        return reply.code(StatusCodes.UNAUTHORIZED).send({
+          success: false,
+          error: "RD Station CRM não conectado",
+        });
+      }
+
+      const params: any = {
+        token: configIA.rdstationAccessToken,
+        page,
+        limit,
+      };
+
+      if (q) {
+        params.q = q;
+      }
+
+      const response = await axios.get(`${RDSTATION_CRM_BASE_URL}/contacts`, {
+        params,
+        timeout: 15000,
+      });
+
+      return reply.code(StatusCodes.OK).send({
+        success: true,
+        data: response.data,
+      });
+    } catch (error: any) {
+      logError("Error fetching RD Station CRM contacts", {
+        error: error.message,
+        response: error.response?.data,
+      });
+
+      if (error.response?.status === 401) {
+        return reply.code(StatusCodes.UNAUTHORIZED).send({
+          success: false,
+          error: "Token inválido ou expirado",
+        });
+      }
+
+      return reply.code(StatusCodes.INTERNAL_SERVER_ERROR).send({
+        success: false,
+        error: "Erro ao buscar contatos do RD Station CRM",
+      });
+    }
+  });
+
+  /**
+   * Criar contato no RD Station CRM
+   */
+  fastify.post<{
+    Params: { configIAId: string };
+    Body: {
+      name: string;
+      title?: string;
+      emails?: Array<{ email: string }>;
+      phones?: Array<{ phone: string; type?: string }>;
+      organization_id?: string;
+      custom_fields?: Record<string, any>;
+    };
+  }>("/rdstation-crm/contacts/:configIAId", async (req, reply) => {
+    const { configIAId } = req.params;
+    const contactData = req.body;
+
+    if (!contactData.name) {
+      return reply.code(StatusCodes.BAD_REQUEST).send({
+        success: false,
+        error: "Nome do contato é obrigatório",
+      });
+    }
+
+    try {
+      const configIA = await db.configIA.findUnique({
+        where: { id: configIAId },
+        select: {
+          rdstationAccessToken: true,
+        },
+      });
+
+      if (!configIA?.rdstationAccessToken) {
+        return reply.code(StatusCodes.UNAUTHORIZED).send({
+          success: false,
+          error: "RD Station CRM não conectado",
+        });
+      }
+
+      const response = await axios.post(
+        `${RDSTATION_CRM_BASE_URL}/contacts`,
+        {
+          ...contactData,
+          token: configIA.rdstationAccessToken,
+        },
+        {
+          headers: {
+            "Content-Type": "application/json",
+          },
+          timeout: 15000,
+        }
+      );
+
+      logInfo("Contact created in RD Station CRM", {
+        configIAId,
+        contactId: response.data?.id,
+      });
+
+      return reply.code(StatusCodes.CREATED).send({
+        success: true,
+        data: response.data,
+      });
+    } catch (error: any) {
+      logError("Error creating RD Station CRM contact", {
+        error: error.message,
+        response: error.response?.data,
+      });
+
+      if (error.response?.status === 401) {
+        return reply.code(StatusCodes.UNAUTHORIZED).send({
+          success: false,
+          error: "Token inválido ou expirado",
+        });
+      }
+
+      return reply.code(StatusCodes.INTERNAL_SERVER_ERROR).send({
+        success: false,
+        error: "Erro ao criar contato no RD Station CRM",
+        details: error.response?.data,
+      });
+    }
+  });
+
+  /**
+   * Listar etapas do funil (deal stages) do RD Station CRM
+   */
+  fastify.get<{
+    Params: { configIAId: string };
+  }>("/rdstation-crm/deal-stages/:configIAId", async (req, reply) => {
+    const { configIAId } = req.params;
+
+    try {
+      const configIA = await db.configIA.findUnique({
+        where: { id: configIAId },
+        select: {
+          rdstationAccessToken: true,
+        },
+      });
+
+      if (!configIA?.rdstationAccessToken) {
+        return reply.code(StatusCodes.UNAUTHORIZED).send({
+          success: false,
+          error: "RD Station CRM não conectado",
+        });
+      }
+
+      const response = await axios.get(`${RDSTATION_CRM_BASE_URL}/deal_stages`, {
+        params: {
+          token: configIA.rdstationAccessToken,
+        },
+        timeout: 15000,
+      });
+
+      return reply.code(StatusCodes.OK).send({
+        success: true,
+        data: response.data,
+      });
+    } catch (error: any) {
+      logError("Error fetching RD Station CRM deal stages", {
+        error: error.message,
+        response: error.response?.data,
+      });
+
+      if (error.response?.status === 401) {
+        return reply.code(StatusCodes.UNAUTHORIZED).send({
+          success: false,
+          error: "Token inválido ou expirado",
+        });
+      }
+
+      return reply.code(StatusCodes.INTERNAL_SERVER_ERROR).send({
+        success: false,
+        error: "Erro ao buscar etapas do funil do RD Station CRM",
+      });
+    }
+  });
+
+  /**
+   * Listar pipelines/funis do RD Station CRM
+   */
+  fastify.get<{
+    Params: { configIAId: string };
+  }>("/rdstation-crm/pipelines/:configIAId", async (req, reply) => {
+    const { configIAId } = req.params;
+
+    try {
+      const configIA = await db.configIA.findUnique({
+        where: { id: configIAId },
+        select: {
+          rdstationAccessToken: true,
+        },
+      });
+
+      if (!configIA?.rdstationAccessToken) {
+        return reply.code(StatusCodes.UNAUTHORIZED).send({
+          success: false,
+          error: "RD Station CRM não conectado",
+        });
+      }
+
+      const response = await axios.get(`${RDSTATION_CRM_BASE_URL}/deal_pipelines`, {
+        params: {
+          token: configIA.rdstationAccessToken,
+        },
+        timeout: 15000,
+      });
+
+      return reply.code(StatusCodes.OK).send({
+        success: true,
+        data: response.data,
+      });
+    } catch (error: any) {
+      logError("Error fetching RD Station CRM pipelines", {
+        error: error.message,
+        response: error.response?.data,
+      });
+
+      if (error.response?.status === 401) {
+        return reply.code(StatusCodes.UNAUTHORIZED).send({
+          success: false,
+          error: "Token inválido ou expirado",
+        });
+      }
+
+      return reply.code(StatusCodes.INTERNAL_SERVER_ERROR).send({
+        success: false,
+        error: "Erro ao buscar funis do RD Station CRM",
       });
     }
   });
