@@ -232,10 +232,12 @@ export default async function (app: FastifyInstance) {
         data: {
           sessionId: sessionId,
           message: aiResponse,
-          direction: "received",
+          direction: "sent", // IA envia mensagem para o usuário
           aiResponse: aiResponse,
           isAiResponse: true,
           chatId: chatId || null,
+          senderId: "ai_assistant", // Identificador para mensagens da IA
+          senderName: "Assistente IA",
           instanceName: finalInstanceName || null,
           createdAt: new Date(),
         },
