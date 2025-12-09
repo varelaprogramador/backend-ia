@@ -221,6 +221,88 @@ function mapCredentialTypeToN8N(type: string): string {
   return typeMap[type] || "httpHeaderAuth";
 }
 
+/**
+ * Validar credencial antes de criar
+ * Testa se a API Key do ChatGPT é válida, por exemplo
+ */
+async function validateCredentialBeforeCreate(
+  type: string,
+  data: any,
+  logger: any
+): Promise<{ valid: boolean; error?: string }> {
+  try {
+    if (type === "CHATGPT") {
+      // Validar API Key do OpenAI
+      const apiKey = data?.data?.apiKey || data?.apiKey;
+
+      if (!apiKey) {
+        return { valid: false, error: "API Key é obrigatória para ChatGPT" };
+      }
+
+      // Testar a API Key fazendo uma chamada simples para listar modelos
+      const response = await axios.get("https://api.openai.com/v1/models", {
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+        },
+        timeout: 10000,
+      });
+
+      if (response.status === 200) {
+        logger?.info("API Key do OpenAI validada com sucesso");
+        return { valid: true };
+      }
+
+      return { valid: false, error: "API Key do OpenAI inválida" };
+    }
+
+    if (type === "GOOGLE_CALENDAR") {
+      // Para Google Calendar, validar se Client ID e Secret foram fornecidos
+      const clientId = data?.clientId;
+      const clientSecret = data?.clientSecret;
+
+      if (!clientId) {
+        return { valid: false, error: "Client ID é obrigatório para Google Calendar" };
+      }
+
+      if (!clientSecret) {
+        return { valid: false, error: "Client Secret é obrigatório para Google Calendar" };
+      }
+
+      // Não é possível validar OAuth2 sem o fluxo completo
+      // Apenas verificamos se os campos foram preenchidos
+      logger?.info("Credenciais do Google Calendar validadas (formato)");
+      return { valid: true };
+    }
+
+    // Para outros tipos, não há validação específica
+    return { valid: true };
+  } catch (error: any) {
+    logger?.error(
+      {
+        error: error.message,
+        response: error.response?.data,
+        status: error.response?.status,
+      },
+      "Erro ao validar credencial"
+    );
+
+    // Tratar erros específicos da OpenAI
+    if (error.response?.status === 401) {
+      return { valid: false, error: "API Key do OpenAI inválida ou expirada" };
+    }
+
+    if (error.response?.status === 429) {
+      return { valid: false, error: "Limite de requisições da OpenAI excedido. Tente novamente mais tarde." };
+    }
+
+    if (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT") {
+      return { valid: false, error: "Timeout ao validar credencial. Verifique sua conexão." };
+    }
+
+    return { valid: false, error: error.response?.data?.error?.message || "Erro ao validar credencial" };
+  }
+}
+
 export default async function (fastify: FastifyInstance) {
   // GET /credentials - List all credentials for the user
   fastify.get("/", async (req, reply) => {
@@ -321,6 +403,20 @@ export default async function (fastify: FastifyInstance) {
           error: "URL é obrigatória para credenciais personalizadas",
         });
       }
+
+      // 0. VALIDAR CREDENCIAL ANTES DE CRIAR
+      req.log.info({ type, name }, "Validando credencial antes de criar...");
+      const validation = await validateCredentialBeforeCreate(type, data, req.log);
+
+      if (!validation.valid) {
+        req.log.warn({ type, name, error: validation.error }, "Credencial inválida");
+        return sendError(reply, {
+          status: StatusCodes.BAD_REQUEST,
+          error: validation.error || "Credencial inválida",
+        });
+      }
+
+      req.log.info({ type, name }, "Credencial validada com sucesso");
 
       // Resolver URL e API Key baseado no tipo
       const finalUrl = resolveCredentialUrl(type, url);
