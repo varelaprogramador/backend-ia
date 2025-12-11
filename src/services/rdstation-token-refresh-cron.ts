@@ -158,10 +158,10 @@ export class RDStationTokenRefreshCronService {
     try {
       logInfo("Starting RD Station token refresh processing...");
 
-      // Buscar todas as ConfigIAs que têm tokens do RD Station
+      // Buscar todas as ConfigIAs que têm refreshToken do RD Station
+      // (accessToken pode estar null se expirou, mas podemos renovar com refreshToken)
       const configsWithTokens = await db.configIA.findMany({
         where: {
-          rdstationAccessToken: { not: null },
           rdstationRefreshToken: { not: null },
           rdstationClientId: { not: null },
           rdstationClientSecret: { not: null },
@@ -182,40 +182,26 @@ export class RDStationTokenRefreshCronService {
         stats.processed++;
 
         try {
-          // Verificar se o token atual ainda é válido
-          const isValid = await this.isTokenValid(config.rdstationAccessToken!);
+          // Verificar se o token atual ainda é válido (se existir)
+          const hasAccessToken = !!config.rdstationAccessToken;
+          const isValid = hasAccessToken ? await this.isTokenValid(config.rdstationAccessToken!) : false;
 
-          if (isValid) {
-            // Token ainda válido, mas vamos renovar proativamente para manter ativo
-            // O access_token tem validade de 2 horas, então renovamos em cada execução do cron
-            const success = await this.refreshTokenForConfig({
-              id: config.id,
-              nome: config.nome,
-              rdstationClientId: config.rdstationClientId!,
-              rdstationClientSecret: config.rdstationClientSecret!,
-              rdstationRefreshToken: config.rdstationRefreshToken!,
-            });
+          // Renovar o token se:
+          // 1. Não tem accessToken (precisa gerar)
+          // 2. Token expirado (isValid = false)
+          // 3. Token válido mas queremos renovar proativamente (access_token tem validade de 2h)
+          const success = await this.refreshTokenForConfig({
+            id: config.id,
+            nome: config.nome,
+            rdstationClientId: config.rdstationClientId!,
+            rdstationClientSecret: config.rdstationClientSecret!,
+            rdstationRefreshToken: config.rdstationRefreshToken!,
+          });
 
-            if (success) {
-              stats.refreshed++;
-            } else {
-              stats.errors++;
-            }
+          if (success) {
+            stats.refreshed++;
           } else {
-            // Token expirado, tentar renovar
-            const success = await this.refreshTokenForConfig({
-              id: config.id,
-              nome: config.nome,
-              rdstationClientId: config.rdstationClientId!,
-              rdstationClientSecret: config.rdstationClientSecret!,
-              rdstationRefreshToken: config.rdstationRefreshToken!,
-            });
-
-            if (success) {
-              stats.refreshed++;
-            } else {
-              stats.errors++;
-            }
+            stats.errors++;
           }
         } catch (error: any) {
           stats.errors++;
