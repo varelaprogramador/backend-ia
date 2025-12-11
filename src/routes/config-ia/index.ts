@@ -651,6 +651,7 @@ export default async function (fastify: FastifyInstance) {
           rdstationAccessToken: validatedData.rdstationAccessToken || null,
           rdstationRefreshToken: validatedData.rdstationRefreshToken || null,
           rdstationCode: validatedData.rdstationCode || null,
+          n8nWorkflowId: workflowId || null, // Salvar ID do workflow N8N
         };
 
         const config = await db.configIA.create({
@@ -939,7 +940,7 @@ export default async function (fastify: FastifyInstance) {
 
         const config = await db.configIA.findUnique({
           where: { id },
-          select: { nome: true, userId: true },
+          select: { nome: true, userId: true, n8nWorkflowId: true },
         });
 
         if (!config) {
@@ -951,6 +952,34 @@ export default async function (fastify: FastifyInstance) {
           );
         }
 
+        // Excluir workflow no N8N se existir
+        let n8nWorkflowDeleted = false;
+        if (config.n8nWorkflowId && process.env.DEFAULT_N8N_URL && process.env.DEFAULT_N8N_API_KEY) {
+          try {
+            const deleteUrl = `${process.env.DEFAULT_N8N_URL}/api/v1/workflows/${config.n8nWorkflowId}`;
+
+            logInfo("Deleting N8N workflow", { workflowId: config.n8nWorkflowId, deleteUrl });
+
+            const deleteResponse = await fetch(deleteUrl, {
+              method: "DELETE",
+              headers: {
+                "Content-Type": "application/json",
+                "X-N8N-API-KEY": process.env.DEFAULT_N8N_API_KEY,
+              },
+            });
+
+            if (deleteResponse.ok) {
+              n8nWorkflowDeleted = true;
+              logInfo("N8N workflow deleted successfully", { workflowId: config.n8nWorkflowId });
+            } else {
+              const errorText = await deleteResponse.text();
+              logError("Failed to delete N8N workflow", new Error(`Status: ${deleteResponse.status}, Response: ${errorText}`));
+            }
+          } catch (deleteError: any) {
+            logError("Error deleting N8N workflow", deleteError);
+          }
+        }
+
         await db.configIA.delete({
           where: { id },
         });
@@ -959,10 +988,14 @@ export default async function (fastify: FastifyInstance) {
           id,
           userId: config.userId,
           nome: config.nome,
+          n8nWorkflowDeleted,
         });
 
         return formatResponse({
-          message: "Configuração de IA excluída com sucesso",
+          message: n8nWorkflowDeleted
+            ? "Configuração de IA e workflow N8N excluídos com sucesso"
+            : "Configuração de IA excluída com sucesso",
+          data: { n8nWorkflowDeleted },
         });
       } catch (error: any) {
         if (error.code === "P2025") {
@@ -1907,6 +1940,15 @@ export default async function (fastify: FastifyInstance) {
           }
         } else if (!workflowId) {
           logInfo("No workflowId returned from N8N, skipping activation");
+        }
+
+        // Atualizar ConfigIA com o ID do workflow N8N
+        if (workflowId) {
+          await db.configIA.update({
+            where: { id: configIA.id },
+            data: { n8nWorkflowId: workflowId },
+          });
+          logInfo("ConfigIA updated with N8N workflow ID", { configIAId: configIA.id, workflowId });
         }
 
         return formatResponse({

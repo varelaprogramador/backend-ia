@@ -187,6 +187,9 @@ model ConfigIA {
   rdstationRefreshToken  String?         // Refresh token para renovar o access token
   rdstationCode          String?         // Código de autorização OAuth
 
+  // Campos de integração com N8N
+  n8nWorkflowId          String?         // ID do workflow criado no N8N
+
   // Credenciais vinculadas
   credentialIds      String[]            @default([]) // Array de IDs de credenciais
 
