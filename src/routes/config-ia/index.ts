@@ -605,6 +605,38 @@ export default async function (fastify: FastifyInstance) {
 
         logInfo("N8N workspace created successfully", { n8nData });
 
+        // Ativar o workflow no N8N se temos o workflowId
+        const workflowId = n8nData?.workflowId || n8nData?.workflow?.id || n8nData?.id;
+        let workflowActivated = false;
+
+        if (workflowId && process.env.DEFAULT_N8N_URL && process.env.DEFAULT_N8N_API_KEY) {
+          try {
+            const activateUrl = `${process.env.DEFAULT_N8N_URL}/api/v1/workflows/${workflowId}/activate`;
+
+            logInfo("Activating N8N workflow", { workflowId, activateUrl });
+
+            const activateResponse = await fetch(activateUrl, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-N8N-API-KEY": process.env.DEFAULT_N8N_API_KEY,
+              },
+            });
+
+            if (activateResponse.ok) {
+              workflowActivated = true;
+              logInfo("N8N workflow activated successfully", { workflowId });
+            } else {
+              const errorText = await activateResponse.text();
+              logError("Failed to activate N8N workflow", new Error(`Status: ${activateResponse.status}, Response: ${errorText}`));
+            }
+          } catch (activateError: any) {
+            logError("Error activating N8N workflow", activateError);
+          }
+        } else if (!workflowId) {
+          logInfo("No workflowId returned from N8N, skipping activation");
+        }
+
         // Se o N8N retornou sucesso, criar no banco de dados
         // Usar as URLs de webhook geradas automaticamente (não do validatedData)
         const dataToCreate = {
@@ -646,8 +678,12 @@ export default async function (fastify: FastifyInstance) {
           data: {
             workspace: config,
             n8nResponse: n8nData,
+            workflowActivated,
+            workflowId: workflowId || null,
           },
-          message: "Workspace criado com sucesso no N8N e no sistema",
+          message: workflowActivated
+            ? "Workspace criado e ativado com sucesso no N8N e no sistema"
+            : "Workspace criado com sucesso no N8N e no sistema",
         });
 
         return reply.code(201).send(response);
@@ -1841,13 +1877,49 @@ export default async function (fastify: FastifyInstance) {
           n8nResponse,
         });
 
+        // Ativar o workflow no N8N se temos o workflowId
+        const workflowId = n8nResponse?.workflowId || n8nResponse?.workflow?.id || n8nResponse?.id;
+        let workflowActivated = false;
+
+        if (workflowId && process.env.DEFAULT_N8N_URL && process.env.DEFAULT_N8N_API_KEY) {
+          try {
+            const activateUrl = `${process.env.DEFAULT_N8N_URL}/api/v1/workflows/${workflowId}/activate`;
+
+            logInfo("Activating N8N workflow", { workflowId, activateUrl });
+
+            const activateResponse = await fetch(activateUrl, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-N8N-API-KEY": process.env.DEFAULT_N8N_API_KEY,
+              },
+            });
+
+            if (activateResponse.ok) {
+              workflowActivated = true;
+              logInfo("N8N workflow activated successfully", { workflowId });
+            } else {
+              const errorText = await activateResponse.text();
+              logError("Failed to activate N8N workflow", new Error(`Status: ${activateResponse.status}, Response: ${errorText}`));
+            }
+          } catch (activateError: any) {
+            logError("Error activating N8N workflow", activateError);
+          }
+        } else if (!workflowId) {
+          logInfo("No workflowId returned from N8N, skipping activation");
+        }
+
         return formatResponse({
           data: {
             workspace: configIA,
             n8nResponse,
             credentialsCount: credentials.length,
+            workflowActivated,
+            workflowId: workflowId || null,
           },
-          message: "Workspace criado no N8N com sucesso",
+          message: workflowActivated
+            ? "Workspace criado e ativado no N8N com sucesso"
+            : "Workspace criado no N8N com sucesso",
         });
       } catch (error) {
         logError("Error creating workspace in N8N", error as Error);
