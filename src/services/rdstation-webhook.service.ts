@@ -24,6 +24,8 @@ const DEAL_EVENTS = [
 interface CreateWebhookParams {
   configIaId: string;
   webhookUrl: string;
+  agentName?: string;
+  funnelId?: string;
 }
 
 interface WebhookResponse {
@@ -86,9 +88,10 @@ export class RDStationWebhookService {
   /**
    * Cria webhooks no RD Station para todos os eventos de deal
    * Retorna os IDs dos webhooks criados
+   * Formato API v2: { "data": { "event_name": "crm_deal_created" }, "name": "..." }
    */
   async createWebhooksForFunnel(params: CreateWebhookParams): Promise<string[]> {
-    const { configIaId, webhookUrl } = params;
+    const { configIaId, webhookUrl, agentName, funnelId } = params;
 
     const accessToken = await this.getAccessToken(configIaId);
     if (!accessToken) {
@@ -98,21 +101,35 @@ export class RDStationWebhookService {
     const url = webhookUrl || this.getWebhookUrl();
     const createdWebhookIds: string[] = [];
 
+    // Gera o nome do webhook: "agentName + funnelId"
+    const webhookBaseName = agentName && funnelId
+      ? `${agentName} - ${funnelId}`
+      : agentName || funnelId || "EAD10 Webhook";
+
     logInfo("Creating RD Station webhooks", {
       configIaId,
       webhookUrl: url,
+      webhookBaseName,
       events: DEAL_EVENTS,
     });
 
     for (const eventType of DEAL_EVENTS) {
       try {
+        // Nome do webhook inclui o tipo de evento para identificação
+        const eventNameShort = eventType.replace("crm_deal_", "");
+        const webhookName = `${webhookBaseName} - ${eventNameShort}`;
+
+        // Formato correto da API v2 do RD Station
+        // Todos os campos ficam dentro do objeto "data"
         const response = await axios.post<WebhookResponse>(
           `${RDSTATION_CRM_API_URL}/webhooks`,
           {
-            url,
-            http_method: "POST",
-            entity_type: "deal", // Entidade: negociacao
-            event_type: eventType,
+            data: {
+              url,
+              name: webhookName,
+              event_name: eventType,
+              http_method: "POST",
+            },
           },
           {
             headers: {
@@ -127,6 +144,7 @@ export class RDStationWebhookService {
           createdWebhookIds.push(response.data.id);
           logInfo("RD Station webhook created", {
             webhookId: response.data.id,
+            webhookName,
             eventType,
             url,
           });
@@ -337,7 +355,11 @@ export class RDStationWebhookService {
    * Configura ou reconfigura webhooks para um funil
    * Se ja existirem, verifica e cria apenas os faltantes
    */
-  async ensureWebhooksConfigured(configIaId: string): Promise<string[]> {
+  async ensureWebhooksConfigured(
+    configIaId: string,
+    agentName?: string,
+    funnelId?: string
+  ): Promise<string[]> {
     const verification = await this.verifyWebhooks(configIaId);
 
     if (verification.isConfigured) {
@@ -362,15 +384,28 @@ export class RDStationWebhookService {
     const webhookUrl = this.getWebhookUrl();
     const createdIds: string[] = [];
 
+    // Gera o nome do webhook: "agentName + funnelId"
+    const webhookBaseName = agentName && funnelId
+      ? `${agentName} - ${funnelId}`
+      : agentName || funnelId || "EAD10 Webhook";
+
     for (const eventType of verification.missingEvents) {
       try {
+        // Nome do webhook inclui o tipo de evento para identificação
+        const eventNameShort = eventType.replace("crm_deal_", "");
+        const webhookName = `${webhookBaseName} - ${eventNameShort}`;
+
+        // Formato correto da API v2 do RD Station
+        // Todos os campos ficam dentro do objeto "data"
         const response = await axios.post<WebhookResponse>(
           `${RDSTATION_CRM_API_URL}/webhooks`,
           {
-            url: webhookUrl,
-            http_method: "POST",
-            entity_type: "deal",
-            event_type: eventType,
+            data: {
+              url: webhookUrl,
+              name: webhookName,
+              event_name: eventType,
+              http_method: "POST",
+            },
           },
           {
             headers: {
@@ -385,6 +420,7 @@ export class RDStationWebhookService {
           createdIds.push(response.data.id);
           logInfo("Missing webhook created", {
             webhookId: response.data.id,
+            webhookName,
             eventType,
           });
         }

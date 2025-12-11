@@ -356,6 +356,7 @@ async function createLeadsFromRDStationDeals(
   if (leadsToCreate.length > 0) {
     await db.funnelLead.createMany({
       data: leadsToCreate.filter((lead) => lead.stageId), // Só criar se tiver stageId válido
+      skipDuplicates: true, // Ignorar leads com rdstationDealId duplicado
     });
   }
 
@@ -754,15 +755,24 @@ export default async function (fastify: FastifyInstance) {
       let rdstationWebhookIds: string[] = [];
       if (funnelData.rdstationPipelineId && funnelData.configIaId) {
         try {
+          // Buscar nome do agente para o nome do webhook
+          const configIa = await db.configIA.findUnique({
+            where: { id: funnelData.configIaId },
+            select: { nome: true },
+          });
+
           logInfo("Creating RD Station webhooks for funnel", {
             funnelId: funnel.id,
             configIaId: funnelData.configIaId,
             pipelineId: funnelData.rdstationPipelineId,
+            agentName: configIa?.nome,
           });
 
           rdstationWebhookIds = await rdstationWebhookService.createWebhooksForFunnel({
             configIaId: funnelData.configIaId,
             webhookUrl: "", // Usa URL padrão do serviço
+            agentName: configIa?.nome,
+            funnelId: funnel.id,
           });
 
           // Atualizar funil com IDs dos webhooks
@@ -821,6 +831,15 @@ export default async function (fastify: FastifyInstance) {
             success: false,
             error: "Dados inválidos",
             data: error.errors,
+          })
+        );
+      }
+      // Verificar se é erro de constraint unique (agente já tem funil)
+      if (error.code === "P2002" && error.meta?.target?.includes("configIaId")) {
+        return reply.code(409).send(
+          formatResponse({
+            success: false,
+            error: "Este agente já possui um funil vinculado. Cada agente só pode ter um funil.",
           })
         );
       }
@@ -895,15 +914,24 @@ export default async function (fastify: FastifyInstance) {
 
       if (isLinkingNewPipeline && configIaId) {
         try {
+          // Buscar nome do agente para o nome do webhook
+          const configIa = await db.configIA.findUnique({
+            where: { id: configIaId },
+            select: { nome: true },
+          });
+
           logInfo("Creating RD Station webhooks for new pipeline link", {
             funnelId: id,
             pipelineId: data.rdstationPipelineId,
             configIaId,
+            agentName: configIa?.nome,
           });
 
           const newWebhookIds = await rdstationWebhookService.createWebhooksForFunnel({
             configIaId,
             webhookUrl: "",
+            agentName: configIa?.nome,
+            funnelId: id,
           });
 
           if (newWebhookIds.length > 0) {
