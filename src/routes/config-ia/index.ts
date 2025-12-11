@@ -451,6 +451,7 @@ export default async function (fastify: FastifyInstance) {
           webhookUrlDev, // URL gerada automaticamente
           webhookUrlProd, // URL gerada automaticamente
           webhookPath, // Path do webhook para referência
+          active: true, // Ativar o workflow automaticamente no N8N
           user: {
             id: user.id,
             name:
@@ -1742,6 +1743,7 @@ export default async function (fastify: FastifyInstance) {
           webhookUrlDev, // URL gerada automaticamente
           webhookUrlProd, // URL gerada automaticamente
           webhookPath, // Path do webhook para referência
+          active: true, // Ativar o workflow automaticamente no N8N
           user: {
             id: configIA.user.id,
             name:
