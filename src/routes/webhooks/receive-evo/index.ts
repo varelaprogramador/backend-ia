@@ -989,7 +989,11 @@ async function createConfigsObject(
         evolutionInstance.configIA?.kommoSubdomain &&
         evolutionInstance.configIA?.kommoAccessToken
       );
-      const isRdConfigured = !!evolutionInstance.configIA?.rdstationAccessToken;
+      // RD Station está configurado se tem accessToken OU se o funil tem pipelineId configurado
+      const isRdConfigured = !!(
+        evolutionInstance.configIA?.rdstationAccessToken ||
+        agentFunnel?.rdstationPipelineId
+      );
       const isCalendarConfigured = hasGoogleCalendar;
 
       logInfo("Evolution instance found in database", {
@@ -1336,9 +1340,9 @@ async function sendToN8N(
         pipelineId: originalWebhook.configs.kommodPipelineId,
       } : null,
 
-      // RD Station CRM integration data (when available)
-      rdstationIntegration: originalWebhook.configs?.rdstationAccessToken ? {
-        accessToken: originalWebhook.configs.rdstationAccessToken,
+      // RD Station CRM integration data (when available - accessToken OR pipelineId)
+      rdstationIntegration: (originalWebhook.configs?.rdstationAccessToken || originalWebhook.configs?.rdstationPipelineId) ? {
+        accessToken: originalWebhook.configs.rdstationAccessToken || null,
         pipelineId: originalWebhook.configs.rdstationPipelineId || null,
         pipelineName: originalWebhook.configs.rdstationPipelineName || null,
         ownerId: originalWebhook.configs.rdstationOwnerId || null,
