@@ -91,12 +91,20 @@ interface EvolutionWebhookBody {
     kommoSubdomain?: string;
     kommoAccessToken?: string;
     kommodPipelineId?: string;
+    // Campos de integração com RD Station CRM
+    rdstationAccessToken?: string;
     // Flags de integração para o N8N
     isKommoConfigured?: boolean;
     isRdConfigured?: boolean;
     isCalendarConfigured?: boolean;
     // Credenciais vinculadas
     credentialIds?: string[];
+    // Dados do funil de vendas vinculado ao agente
+    funnelId?: string;
+    funnelName?: string;
+    rdstationPipelineId?: string;
+    rdstationPipelineName?: string;
+    rdstationOwnerId?: string;
   };
 }
 
@@ -875,12 +883,20 @@ async function createConfigsObject(
   kommoSubdomain?: string;
   kommoAccessToken?: string;
   kommodPipelineId?: string;
+  // Campos de integração com RD Station CRM
+  rdstationAccessToken?: string;
   // Flags de integração para o N8N
   isKommoConfigured?: boolean;
   isRdConfigured?: boolean;
   isCalendarConfigured?: boolean;
   // Credenciais vinculadas
   credentialIds?: string[];
+  // Dados do funil de vendas vinculado ao agente
+  funnelId?: string;
+  funnelName?: string;
+  rdstationPipelineId?: string;
+  rdstationPipelineName?: string;
+  rdstationOwnerId?: string;
 }> {
   try {
     logInfo("Creating configs object for webhook identification", {
@@ -927,6 +943,31 @@ async function createConfigsObject(
     };
 
     if (evolutionInstance) {
+      // Buscar o funil de vendas vinculado ao agente (relação 1:1)
+      let agentFunnel: {
+        id: string;
+        name: string;
+        rdstationPipelineId: string | null;
+        rdstationPipelineName: string | null;
+        rdstationOwnerId: string | null;
+      } | null = null;
+
+      if (evolutionInstance.configIAId) {
+        agentFunnel = await db.funnel.findFirst({
+          where: {
+            configIaId: evolutionInstance.configIAId,
+            isActive: true,
+          },
+          select: {
+            id: true,
+            name: true,
+            rdstationPipelineId: true,
+            rdstationPipelineName: true,
+            rdstationOwnerId: true,
+          },
+        });
+      }
+
       // Verificar se há credencial de Google Calendar vinculada ao agente
       let hasGoogleCalendar = false;
       const credentialIds = evolutionInstance.configIA?.credentialIds || [];
@@ -998,11 +1039,19 @@ async function createConfigsObject(
         kommoSubdomain: evolutionInstance.configIA?.kommoSubdomain || undefined,
         kommoAccessToken: evolutionInstance.configIA?.kommoAccessToken || undefined,
         kommodPipelineId: evolutionInstance.configIA?.kommodPipelineId || undefined,
+        // Campos de integração com RD Station CRM
+        rdstationAccessToken: evolutionInstance.configIA?.rdstationAccessToken || undefined,
         // Novas flags de integração para o N8N
         isKommoConfigured,
         isRdConfigured,
         isCalendarConfigured,
         credentialIds,
+        // Dados do funil de vendas vinculado ao agente
+        funnelId: agentFunnel?.id || undefined,
+        funnelName: agentFunnel?.name || undefined,
+        rdstationPipelineId: agentFunnel?.rdstationPipelineId || undefined,
+        rdstationPipelineName: agentFunnel?.rdstationPipelineName || undefined,
+        rdstationOwnerId: agentFunnel?.rdstationOwnerId || undefined,
       };
     } else {
       logInfo("Evolution instance not found in database", {
@@ -1285,6 +1334,20 @@ async function sendToN8N(
         subdomain: originalWebhook.configs.kommoSubdomain,
         accessToken: originalWebhook.configs.kommoAccessToken,
         pipelineId: originalWebhook.configs.kommodPipelineId,
+      } : null,
+
+      // RD Station CRM integration data (when available)
+      rdstationIntegration: originalWebhook.configs?.rdstationAccessToken ? {
+        accessToken: originalWebhook.configs.rdstationAccessToken,
+        pipelineId: originalWebhook.configs.rdstationPipelineId || null,
+        pipelineName: originalWebhook.configs.rdstationPipelineName || null,
+        ownerId: originalWebhook.configs.rdstationOwnerId || null,
+      } : null,
+
+      // Funil de vendas vinculado ao agente
+      funnelData: originalWebhook.configs?.funnelId ? {
+        id: originalWebhook.configs.funnelId,
+        name: originalWebhook.configs.funnelName || null,
       } : null,
 
       // Flags de integrações configuradas para o N8N

@@ -199,8 +199,8 @@ model ConfigIA {
   // Relação com números desativados
   deactivatedAgents  DeactivatedAgent[]
 
-  // Relação com Funis de Vendas
-  funnels            Funnel[]
+  // Relação com Funil de Vendas (1:1 - cada agente só pode ter um funil)
+  funnel             Funnel?
 
   @@index([userId])
   @@map("config_ia")
@@ -367,8 +367,8 @@ model Funnel {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  // Vinculacao com Agente/Workspace (opcional)
-  configIaId  String?
+  // Vinculacao com Agente/Workspace (1:1 - cada agente só pode ter um funil)
+  configIaId  String?   @unique
   configIa    ConfigIA? @relation(fields: [configIaId], references: [id], onDelete: SetNull)
 
   // Vinculacao com Pipeline do Kommo (via agente)
