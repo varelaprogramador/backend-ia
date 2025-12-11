@@ -367,11 +367,22 @@ model Funnel {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  // Vinculação com Agente/Workspace (opcional)
+  // Vinculacao com Agente/Workspace (opcional)
   configIaId  String?
   configIa    ConfigIA? @relation(fields: [configIaId], references: [id], onDelete: SetNull)
 
-  // Relações
+  // Vinculacao com Pipeline do Kommo (via agente)
+  kommoPipelineId   String?  // ID do pipeline no Kommo
+  kommoPipelineName String?  // Nome do pipeline (para exibicao)
+
+  // Vinculacao com Pipeline do RD Station CRM (via agente)
+  rdstationPipelineId   String?  // ID do pipeline/funil no RD Station
+  rdstationPipelineName String?  // Nome do pipeline (para exibicao)
+  rdstationOwnerId      String?  // ID do usuario responsavel pelos deals no RD Station
+  rdstationOwnerName    String?  // Nome do usuario (para exibicao)
+  rdstationWebhookIds   String[] @default([]) // IDs dos webhooks criados no RD Station
+
+  // Relacoes
   stages           FunnelStage[]
   leads            FunnelLead[]
   followUpAgent    FollowUpAgent?
@@ -381,6 +392,8 @@ model Funnel {
   @@index([userId])
   @@index([isActive])
   @@index([configIaId])
+  @@index([kommoPipelineId])
+  @@index([rdstationPipelineId])
   @@map("funnels")
 }
 
@@ -396,11 +409,15 @@ model FunnelStage {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // Integração com RD Station CRM
+  rdstationStageId String? // ID do estágio correspondente no RD Station CRM
+
   // Relações
   leads FunnelLead[]
 
   @@index([funnelId])
   @@index([order])
+  @@index([rdstationStageId])
   @@map("funnel_stages")
 }
 
@@ -430,6 +447,9 @@ model FunnelLead {
   whatsappProfilePic  String? // URL da foto do perfil
   evolutionInstanceId String? // ID da instância Evolution vinculada
 
+  // Integração com RD Station CRM
+  rdstationDealId   String?  @unique // ID do deal correspondente no RD Station CRM
+
   // Datas importantes
   expectedCloseDate DateTime?
   lastContactAt     DateTime?
@@ -455,6 +475,7 @@ model FunnelLead {
   @@index([email])
   @@index([whatsappJid])
   @@index([isInFollowUpFlow])
+  @@index([rdstationDealId])
   @@map("funnel_leads")
 }
 

@@ -91,6 +91,12 @@ interface EvolutionWebhookBody {
     kommoSubdomain?: string;
     kommoAccessToken?: string;
     kommodPipelineId?: string;
+    // Flags de integração para o N8N
+    isKommoConfigured?: boolean;
+    isRdConfigured?: boolean;
+    isCalendarConfigured?: boolean;
+    // Credenciais vinculadas
+    credentialIds?: string[];
   };
 }
 
@@ -869,6 +875,12 @@ async function createConfigsObject(
   kommoSubdomain?: string;
   kommoAccessToken?: string;
   kommodPipelineId?: string;
+  // Flags de integração para o N8N
+  isKommoConfigured?: boolean;
+  isRdConfigured?: boolean;
+  isCalendarConfigured?: boolean;
+  // Credenciais vinculadas
+  credentialIds?: string[];
 }> {
   try {
     logInfo("Creating configs object for webhook identification", {
@@ -895,6 +907,10 @@ async function createConfigsObject(
             kommoSubdomain: true,
             kommoAccessToken: true,
             kommodPipelineId: true,
+            // Campos de integração com RD Station
+            rdstationAccessToken: true,
+            // Credenciais vinculadas
+            credentialIds: true,
           },
         },
         user: true,
@@ -911,6 +927,30 @@ async function createConfigsObject(
     };
 
     if (evolutionInstance) {
+      // Verificar se há credencial de Google Calendar vinculada ao agente
+      let hasGoogleCalendar = false;
+      const credentialIds = evolutionInstance.configIA?.credentialIds || [];
+
+      if (credentialIds.length > 0) {
+        const googleCalendarCredential = await db.credential.findFirst({
+          where: {
+            id: { in: credentialIds },
+            type: "GOOGLE_CALENDAR",
+            isActive: true,
+          },
+          select: { id: true },
+        });
+        hasGoogleCalendar = !!googleCalendarCredential;
+      }
+
+      // Determinar flags de integração
+      const isKommoConfigured = !!(
+        evolutionInstance.configIA?.kommoSubdomain &&
+        evolutionInstance.configIA?.kommoAccessToken
+      );
+      const isRdConfigured = !!evolutionInstance.configIA?.rdstationAccessToken;
+      const isCalendarConfigured = hasGoogleCalendar;
+
       logInfo("Evolution instance found in database", {
         instanceId: evolutionInstance.id,
         userId: evolutionInstance.userId,
@@ -938,6 +978,11 @@ async function createConfigsObject(
             }
           : "NO_CONFIG_IA",
         apiKeySource: evolutionInstance.apiKey ? "database" : "webhook",
+        // Novas flags de integração
+        isKommoConfigured,
+        isRdConfigured,
+        isCalendarConfigured,
+        credentialIds,
       });
 
       return {
@@ -953,6 +998,11 @@ async function createConfigsObject(
         kommoSubdomain: evolutionInstance.configIA?.kommoSubdomain || undefined,
         kommoAccessToken: evolutionInstance.configIA?.kommoAccessToken || undefined,
         kommodPipelineId: evolutionInstance.configIA?.kommodPipelineId || undefined,
+        // Novas flags de integração para o N8N
+        isKommoConfigured,
+        isRdConfigured,
+        isCalendarConfigured,
+        credentialIds,
       };
     } else {
       logInfo("Evolution instance not found in database", {
@@ -1237,6 +1287,13 @@ async function sendToN8N(
         pipelineId: originalWebhook.configs.kommodPipelineId,
       } : null,
 
+      // Flags de integrações configuradas para o N8N
+      integrations: {
+        isKommoConfigured: originalWebhook.configs?.isKommoConfigured || false,
+        isRdConfigured: originalWebhook.configs?.isRdConfigured || false,
+        isCalendarConfigured: originalWebhook.configs?.isCalendarConfigured || false,
+      },
+
       // Processing metadata
       processingInfo: {
         processedAt: new Date().toISOString(),
@@ -1245,6 +1302,10 @@ async function sendToN8N(
           ? `${Math.round(savedMessage.mediaBase64.length / 1024)}KB`
           : null,
         hasKommoIntegration: !!originalWebhook.configs?.kommoSubdomain,
+        // Novas flags
+        isKommoConfigured: originalWebhook.configs?.isKommoConfigured || false,
+        isRdConfigured: originalWebhook.configs?.isRdConfigured || false,
+        isCalendarConfigured: originalWebhook.configs?.isCalendarConfigured || false,
       },
     };
 

@@ -18,6 +18,7 @@ import { ENV } from "@/config/env";
 
 import { UserSyncService } from "@/services/user-sync";
 import { followUpFlowCronService } from "@/services/follow-up-flow-cron";
+import { rdstationTokenRefreshCronService } from "@/services/rdstation-token-refresh-cron";
 import type { BatchManager, RealtimePayload } from "@/types/IO";
 import { logError, logInfo, logWarn } from "@/utils/logger";
 import { createFilteredFastifyLogger } from "@/utils/filtered-logger";
@@ -369,8 +370,8 @@ app.register(cors, {
 
 // Configuração de CORS específica para webhooks (permite qualquer origem)
 app.addHook("onRequest", async (request, reply) => {
-  // Verificar se a requisição é para webhook
-  if (request.url.startsWith("/webhooks/automations")) {
+  // Verificar se a requisição é para webhook (automations ou rdstation-crm)
+  if (request.url.startsWith("/webhooks/automations") || request.url.startsWith("/webhooks/rdstation-crm")) {
     // Remover headers CORS existentes
     reply.removeHeader("Access-Control-Allow-Origin");
     reply.removeHeader("Access-Control-Allow-Credentials");
@@ -735,6 +736,9 @@ let userSyncTask: cron.ScheduledTask | null = null;
 // Follow-up flow automation cron job
 let followUpFlowTask: cron.ScheduledTask | null = null;
 
+// RD Station token refresh cron job
+let rdstationTokenRefreshTask: cron.ScheduledTask | null = null;
+
 // Initialize user sync cron job
 const initUserSyncCron = () => {
   const cronSchedule = ENV.USER_SYNC_CRON_SCHEDULE || "0 */15 * * * *"; // Every 15 minutes by default (optimized)
@@ -784,6 +788,29 @@ const initFollowUpFlowCron = () => {
   logInfo(`Follow-up flow cron job scheduled: ${cronSchedule}`);
 };
 
+// Initialize RD Station token refresh cron job
+const initRDStationTokenRefreshCron = () => {
+  // Run every hour to proactively refresh tokens (access_token expires in 2 hours)
+  // This ensures tokens are always fresh and avoids expiration issues
+  const cronSchedule = "0 * * * *"; // Every hour at minute 0
+
+  rdstationTokenRefreshTask = cron.schedule(
+    cronSchedule,
+    async () => {
+      try {
+        await rdstationTokenRefreshCronService.processTokenRefresh();
+      } catch (error) {
+        logError("RD Station token refresh cron job failed", error as Error);
+      }
+    },
+    {
+      timezone: "America/Sao_Paulo",
+    }
+  );
+
+  logInfo(`RD Station token refresh cron job scheduled: ${cronSchedule}`);
+};
+
 // Enhanced graceful shutdown
 const signals = ["SIGINT", "SIGTERM"];
 let shuttingDown = false;
@@ -807,6 +834,10 @@ signals.forEach((signal) => {
       if (followUpFlowTask) {
         followUpFlowTask.stop();
         logInfo("⏱️ Follow-up flow cron job stopped");
+      }
+      if (rdstationTokenRefreshTask) {
+        rdstationTokenRefreshTask.stop();
+        logInfo("⏱️ RD Station token refresh cron job stopped");
       }
 
       // Stop accepting new connections
@@ -854,6 +885,9 @@ app.listen(
     // Initialize follow-up flow automation cron job
     initFollowUpFlowCron();
 
+    // Initialize RD Station token refresh cron job
+    initRDStationTokenRefreshCron();
+
     // Log cron job status and run initial sync if enabled
     if (userSyncTask) {
       logInfo("⏱️ User sync cron job started");
@@ -872,6 +906,11 @@ app.listen(
     // Log follow-up flow cron job status
     if (followUpFlowTask) {
       logInfo("⏱️ Follow-up flow cron job started (every 5 minutes)");
+    }
+
+    // Log RD Station token refresh cron job status
+    if (rdstationTokenRefreshTask) {
+      logInfo("⏱️ RD Station token refresh cron job started (every hour)");
     }
 
     // Log server configuration

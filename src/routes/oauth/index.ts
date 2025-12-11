@@ -755,12 +755,14 @@ export default async function (fastify: FastifyInstance) {
   });
 
   /**
-   * Listar etapas do funil (deal stages) do RD Station CRM
+   * Listar etapas de um pipeline específico do RD Station CRM
+   * Endpoint: GET /pipelines/{pipeline_id}/stages
+   * Documentação: https://developers.rdstation.com/reference/crm-v2-list-stages
    */
   fastify.get<{
-    Params: { configIAId: string };
-  }>("/rdstation/deal-stages/:configIAId", async (req, reply) => {
-    const { configIAId } = req.params;
+    Params: { configIAId: string; pipelineId: string };
+  }>("/rdstation/pipelines/:pipelineId/stages/:configIAId", async (req, reply) => {
+    const { configIAId, pipelineId } = req.params;
 
     try {
       const configIA = await db.configIA.findUnique({
@@ -777,20 +779,30 @@ export default async function (fastify: FastifyInstance) {
         });
       }
 
-      const response = await axios.get(`${RDSTATION_CRM_API_URL}/deal_stages`, {
-        headers: {
-          Authorization: `Bearer ${configIA.rdstationAccessToken}`,
-        },
-        timeout: 15000,
-      });
+      // RD Station CRM v2 API - listar stages de um pipeline específico
+      // Documentação: https://developers.rdstation.com/reference/crm-v2-list-stages
+      const response = await axios.get(
+        `${RDSTATION_CRM_API_URL}/pipelines/${pipelineId}/stages`,
+        {
+          headers: {
+            Authorization: `Bearer ${configIA.rdstationAccessToken}`,
+          },
+          params: {
+            "page[number]": 1,
+            "page[size]": 100, // Buscar até 100 estágios
+          },
+          timeout: 15000,
+        }
+      );
 
       return reply.code(StatusCodes.OK).send({
         success: true,
         data: response.data,
       });
     } catch (error: any) {
-      logError("Error fetching RD Station CRM deal stages", {
+      logError("Error fetching RD Station CRM pipeline stages", {
         error: error.message,
+        pipelineId,
         response: error.response?.data,
       });
 
@@ -809,12 +821,16 @@ export default async function (fastify: FastifyInstance) {
   });
 
   /**
-   * Listar pipelines/funis do RD Station CRM
+   * Listar negociações (deals) de um pipeline específico do RD Station CRM
+   * Endpoint: GET /deals?pipeline_id={pipeline_id}
+   * Documentação: https://developers.rdstation.com/reference/crm-v2-list-deals
    */
   fastify.get<{
-    Params: { configIAId: string };
-  }>("/rdstation/pipelines/:configIAId", async (req, reply) => {
-    const { configIAId } = req.params;
+    Params: { configIAId: string; pipelineId: string };
+    Querystring: { page?: string; limit?: string };
+  }>("/rdstation/pipelines/:pipelineId/deals/:configIAId", async (req, reply) => {
+    const { configIAId, pipelineId } = req.params;
+    const { page = "1", limit = "100" } = req.query;
 
     try {
       const configIA = await db.configIA.findUnique({
@@ -831,9 +847,145 @@ export default async function (fastify: FastifyInstance) {
         });
       }
 
-      const response = await axios.get(`${RDSTATION_CRM_API_URL}/deal_pipelines`, {
+      // RD Station CRM v2 API - listar deals de um pipeline específico
+      // Documentação: https://developers.rdstation.com/reference/crm-v2-list-deals
+      const response = await axios.get(`${RDSTATION_CRM_API_URL}/deals`, {
         headers: {
           Authorization: `Bearer ${configIA.rdstationAccessToken}`,
+        },
+        params: {
+          "page[number]": parseInt(page),
+          "page[size]": parseInt(limit),
+          "pipeline_id": pipelineId,
+        },
+        timeout: 15000,
+      });
+
+      return reply.code(StatusCodes.OK).send({
+        success: true,
+        data: response.data,
+      });
+    } catch (error: any) {
+      logError("Error fetching RD Station CRM deals", {
+        error: error.message,
+        pipelineId,
+        response: error.response?.data,
+      });
+
+      if (error.response?.status === 401) {
+        return reply.code(StatusCodes.UNAUTHORIZED).send({
+          success: false,
+          error: "Token inválido ou expirado",
+        });
+      }
+
+      return reply.code(StatusCodes.INTERNAL_SERVER_ERROR).send({
+        success: false,
+        error: "Erro ao buscar negociações do RD Station CRM",
+      });
+    }
+  });
+
+  /**
+   * Listar pipelines/funis do RD Station CRM
+   * Se tiver code mas não tiver accessToken, tenta fazer o token exchange automaticamente
+   */
+  fastify.get<{
+    Params: { configIAId: string };
+    Querystring: { redirectUri?: string };
+  }>("/rdstation/pipelines/:configIAId", async (req, reply) => {
+    const { configIAId } = req.params;
+    const { redirectUri } = req.query;
+
+    try {
+      let configIA = await db.configIA.findUnique({
+        where: { id: configIAId },
+        select: {
+          id: true,
+          nome: true,
+          rdstationClientId: true,
+          rdstationClientSecret: true,
+          rdstationAccessToken: true,
+          rdstationRefreshToken: true,
+          rdstationCode: true,
+        },
+      });
+
+      if (!configIA) {
+        return reply.code(StatusCodes.NOT_FOUND).send({
+          success: false,
+          error: "Configuração não encontrada",
+        });
+      }
+
+      // Se tem code mas não tem accessToken, tentar fazer o token exchange
+      if (!configIA.rdstationAccessToken && configIA.rdstationCode && configIA.rdstationClientId && configIA.rdstationClientSecret) {
+        logInfo("Attempting automatic token exchange for RD Station", { configIAId });
+
+        // Determinar o redirectUri para o token exchange
+        const exchangeRedirectUri = redirectUri || `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/api/rdstation/callback`;
+
+        try {
+          const tokenResponse = await axios.post(
+            RDSTATION_TOKEN_URL,
+            new URLSearchParams({
+              client_id: configIA.rdstationClientId,
+              client_secret: configIA.rdstationClientSecret,
+              code: configIA.rdstationCode,
+              redirect_uri: exchangeRedirectUri,
+              grant_type: "authorization_code",
+            }).toString(),
+            {
+              headers: {
+                "Content-Type": "application/x-www-form-urlencoded",
+              },
+              timeout: 15000,
+            }
+          );
+
+          const { access_token, refresh_token } = tokenResponse.data;
+
+          if (access_token) {
+            // Atualizar ConfigIA com os tokens
+            await db.configIA.update({
+              where: { id: configIAId },
+              data: {
+                rdstationAccessToken: access_token,
+                rdstationRefreshToken: refresh_token || null,
+              },
+            });
+
+            logInfo("RD Station automatic token exchange successful", { configIAId });
+
+            // Atualizar o objeto local para continuar com a busca de pipelines
+            configIA = { ...configIA, rdstationAccessToken: access_token };
+          }
+        } catch (tokenError: any) {
+          logError("Automatic token exchange failed", {
+            error: tokenError.message,
+            response: tokenError.response?.data,
+          });
+          // Se falhou o token exchange, continuar e retornar erro de não conectado
+        }
+      }
+
+      if (!configIA.rdstationAccessToken) {
+        return reply.code(StatusCodes.UNAUTHORIZED).send({
+          success: false,
+          error: "RD Station CRM não conectado. Autorize novamente através das configurações do agente.",
+          needsAuthorization: true,
+        });
+      }
+
+      // RD Station CRM v2 API - endpoint correto é /pipelines
+      // Documentação: https://developers.rdstation.com/reference/crm-v2-list-pipelines
+      const response = await axios.get(`${RDSTATION_CRM_API_URL}/pipelines`, {
+        headers: {
+          Authorization: `Bearer ${configIA.rdstationAccessToken}`,
+        },
+        params: {
+          "page[number]": 1,
+          "page[size]": 100, // Buscar até 100 pipelines
         },
         timeout: 15000,
       });
@@ -851,7 +1003,8 @@ export default async function (fastify: FastifyInstance) {
       if (error.response?.status === 401) {
         return reply.code(StatusCodes.UNAUTHORIZED).send({
           success: false,
-          error: "Token inválido ou expirado",
+          error: "Token inválido ou expirado. Reconecte com o RD Station.",
+          needsReauthorization: true,
         });
       }
 

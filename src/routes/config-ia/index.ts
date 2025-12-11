@@ -205,6 +205,16 @@ export default async function (fastify: FastifyInstance) {
           );
         }
 
+        // Debug log para RD Station
+        console.log("🔍 [GET CONFIG BY ID] RD Station fields:", {
+          id: config.id,
+          nome: config.nome,
+          rdstationClientId: config.rdstationClientId,
+          rdstationClientSecret: config.rdstationClientSecret ? "***" : null,
+          rdstationCode: config.rdstationCode,
+          rdstationAccessToken: config.rdstationAccessToken ? "***" : null,
+        });
+
         return formatResponse({ data: config });
       } catch (error) {
         logError("Error getting AI configuration", error as Error);

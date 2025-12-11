@@ -2,18 +2,70 @@ import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { formatResponse } from "@/utils/response-formatter";
-import { logError, logInfo } from "@/utils/logger";
+import { logError, logInfo, logWarn } from "@/utils/logger";
+import { rdstationWebhookService } from "@/services/rdstation-webhook.service";
+import { rdstationDealsService } from "@/services/rdstation-deals.service";
 
 // ========================================
 // SCHEMAS
 // ========================================
+
+// Schema para stages do Kommo
+const kommoStageSchema = z.object({
+  id: z.number(),
+  name: z.string(),
+  sort: z.number(),
+  color: z.string(),
+});
+
+// Schema para stages do RD Station
+const rdstationStageSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  nickname: z.string().optional(),
+  order: z.number().optional(),
+});
+
+// Schema para deals do RD Station
+// Status do RD Station: won (ganho), lost (perdido), ongoing (em andamento)
+const rdstationDealSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  recurrence_price: z.number().optional(),
+  one_time_price: z.number().optional(),
+  total_price: z.number().optional(),
+  expected_close_date: z.string().optional().nullable(),
+  rating: z.number().optional(),
+  status: z.enum(["won", "lost", "pending", "ongoing"]).optional(),
+  pipeline_id: z.string(),
+  stage_id: z.string(),
+  owner_id: z.string().optional().nullable(),
+  source_id: z.string().optional().nullable(),
+  organization_id: z.string().optional().nullable(),
+  contact_ids: z.array(z.string()).optional().default([]),
+  custom_fields: z.record(z.any()).optional(),
+  created_at: z.string().optional(),
+  updated_at: z.string().optional(),
+});
 
 const funnelSchema = z.object({
   userId: z.string(),
   name: z.string().min(1),
   description: z.string().optional(),
   isActive: z.boolean().optional().default(true),
-  configIaId: z.string().optional().nullable(), // Vinculação com Agente/Workspace
+  configIaId: z.string().optional().nullable(), // Vinculacao com Agente/Workspace
+  // Vinculacao com Pipeline do Kommo
+  kommoPipelineId: z.string().optional().nullable(),
+  kommoPipelineName: z.string().optional().nullable(),
+  kommoStages: z.array(kommoStageSchema).optional().default([]),
+  // Vinculacao com Pipeline do RD Station CRM
+  rdstationPipelineId: z.string().optional().nullable(),
+  rdstationPipelineName: z.string().optional().nullable(),
+  rdstationOwnerId: z.string().optional().nullable(), // ID do usuario responsavel pelos deals
+  rdstationOwnerName: z.string().optional().nullable(), // Nome do usuario (para exibicao)
+  rdstationStages: z.array(rdstationStageSchema).optional().default([]),
+  rdstationDeals: z.array(rdstationDealSchema).optional().default([]), // Deals para importar como leads
+  rdstationWebhookIds: z.array(z.string()).optional().default([]), // IDs dos webhooks criados no RD Station
 });
 
 const updateFunnelSchema = funnelSchema.partial().omit({ userId: true });
@@ -125,28 +177,406 @@ const createContactSchema = z.object({
 });
 
 // ========================================
-// HELPER: Create default stages
+// HELPER: Create stages
 // ========================================
 
-async function createDefaultStages(funnelId: string) {
-  const defaultStages = [
-    { name: "Novo Lead", color: "#3b82f6", order: 0, isFixed: false },
-    { name: "Contato Inicial", color: "#8b5cf6", order: 1, isFixed: false },
-    { name: "Proposta Enviada", color: "#f59e0b", order: 2, isFixed: false },
-    { name: "Negociação", color: "#ec4899", order: 3, isFixed: false },
+// Tipo para stages do Kommo
+interface KommoStage {
+  id: number;
+  name: string;
+  sort: number;
+  color: string;
+}
+
+// Tipo para stages do RD Station
+interface RDStationStage {
+  id: string;
+  name: string;
+  nickname?: string;
+  order?: number;
+}
+
+// Tipo para deals do RD Station
+// Status do RD Station: won (ganho), lost (perdido), ongoing (em andamento)
+interface RDStationDeal {
+  id: string;
+  name: string;
+  recurrence_price?: number;
+  one_time_price?: number;
+  total_price?: number;
+  expected_close_date?: string | null;
+  rating?: number;
+  status?: "won" | "lost" | "pending" | "ongoing";
+  pipeline_id: string;
+  stage_id: string;
+  owner_id?: string | null;
+  source_id?: string | null;
+  organization_id?: string | null;
+  contact_ids?: string[];
+  custom_fields?: Record<string, any>;
+  created_at?: string;
+  updated_at?: string;
+}
+
+// Cores padrão para stages quando não fornecidas
+const stageColors = [
+  "#3b82f6", // blue
+  "#8b5cf6", // violet
+  "#f59e0b", // amber
+  "#ec4899", // pink
+  "#14b8a6", // teal
+  "#f97316", // orange
+  "#6366f1", // indigo
+  "#84cc16", // lime
+];
+
+async function createStagesFromCRM(
+  funnelId: string,
+  kommoStages: KommoStage[],
+  rdstationStages: RDStationStage[]
+) {
+  let stages: { name: string; color: string; order: number; isFixed: boolean; fixedType?: string; rdstationStageId?: string }[] = [];
+
+  // Se tiver stages do Kommo, usar eles
+  if (kommoStages && kommoStages.length > 0) {
+    stages = kommoStages
+      .sort((a, b) => a.sort - b.sort)
+      .map((stage, index) => ({
+        name: stage.name,
+        color: stage.color || stageColors[index % stageColors.length],
+        order: index,
+        isFixed: false,
+      }));
+  }
+  // Se tiver stages do RD Station, usar eles
+  else if (rdstationStages && rdstationStages.length > 0) {
+    stages = rdstationStages
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+      .map((stage, index) => ({
+        name: stage.nickname || stage.name,
+        color: stageColors[index % stageColors.length],
+        order: index,
+        isFixed: false,
+        rdstationStageId: stage.id, // Salvar o ID do stage do RD Station
+      }));
+  }
+  // Caso contrário, usar stages padrão
+  else {
+    stages = [
+      { name: "Novo Lead", color: "#3b82f6", order: 0, isFixed: false },
+      { name: "Contato Inicial", color: "#8b5cf6", order: 1, isFixed: false },
+      { name: "Proposta Enviada", color: "#f59e0b", order: 2, isFixed: false },
+      { name: "Negociação", color: "#ec4899", order: 3, isFixed: false },
+    ];
+  }
+
+  // Sempre adicionar estágios fixos de Ganho e Perdido no final
+  const fixedStages = [
     { name: "Ganho", color: "#22c55e", order: 100, isFixed: true, fixedType: "won" },
     { name: "Perdido", color: "#ef4444", order: 101, isFixed: true, fixedType: "lost" },
   ];
 
+  const allStages = [...stages, ...fixedStages];
+
   await db.funnelStage.createMany({
-    data: defaultStages.map((stage) => ({
+    data: allStages.map((stage) => ({
       funnelId,
       ...stage,
     })),
   });
 }
 
+/**
+ * Cria leads a partir dos deals do RD Station
+ * Mapeia o stage_id do RD Station para o stage do funil criado
+ */
+async function createLeadsFromRDStationDeals(
+  funnelId: string,
+  rdstationDeals: RDStationDeal[],
+  rdstationStages: RDStationStage[]
+) {
+  if (!rdstationDeals || rdstationDeals.length === 0) {
+    return;
+  }
+
+  // Buscar os stages criados no funil
+  const funnelStages = await db.funnelStage.findMany({
+    where: { funnelId },
+    orderBy: { order: "asc" },
+  });
+
+  // Criar mapa de stage_id do RD Station para stage_id do funil
+  // O índice do stage no RD Station corresponde ao índice do stage no funil
+  const stageMap = new Map<string, string>();
+
+  // Ordenar os stages do RD Station pela ordem
+  const sortedRdStages = [...rdstationStages].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+
+  // Mapear cada stage_id do RD Station para o stage correspondente no funil
+  sortedRdStages.forEach((rdStage, index) => {
+    const funnelStage = funnelStages[index];
+    if (funnelStage && !funnelStage.isFixed) {
+      stageMap.set(rdStage.id, funnelStage.id);
+    }
+  });
+
+  // Encontrar o primeiro stage do funil como fallback
+  const firstStage = funnelStages.find((s) => !s.isFixed);
+  const wonStage = funnelStages.find((s) => s.fixedType === "won");
+  const lostStage = funnelStages.find((s) => s.fixedType === "lost");
+
+  // Criar leads a partir dos deals
+  const leadsToCreate = rdstationDeals.map((deal, index) => {
+    // Determinar o stage baseado no status do deal ou no stage_id
+    let stageId: string;
+
+    if (deal.status === "won" && wonStage) {
+      stageId = wonStage.id;
+    } else if (deal.status === "lost" && lostStage) {
+      stageId = lostStage.id;
+    } else {
+      // Usar o mapeamento de stages ou o primeiro stage como fallback
+      stageId = stageMap.get(deal.stage_id) || firstStage?.id || funnelStages[0]?.id;
+    }
+
+    return {
+      funnelId,
+      stageId,
+      name: deal.name,
+      value: deal.total_price ?? 0,
+      source: "RD Station CRM",
+      priority: deal.rating && deal.rating >= 4 ? "high" : deal.rating && deal.rating >= 2 ? "medium" : "low",
+      expectedCloseDate: deal.expected_close_date ? new Date(deal.expected_close_date) : null,
+      order: index,
+      notes: `Importado do RD Station - Deal ID: ${deal.id}`,
+      rdstationDealId: deal.id, // Salvar o ID do deal do RD Station para sincronização bidirecional
+    };
+  });
+
+  if (leadsToCreate.length > 0) {
+    await db.funnelLead.createMany({
+      data: leadsToCreate.filter((lead) => lead.stageId), // Só criar se tiver stageId válido
+    });
+  }
+
+  logInfo("Leads created from RD Station deals", {
+    funnelId,
+    dealsCount: rdstationDeals.length,
+    leadsCreated: leadsToCreate.length,
+  });
+}
+
 export default async function (fastify: FastifyInstance) {
+  // ========================================
+  // FUNNEL STATS ROUTES
+  // ========================================
+
+  // GET /funnel/stats/agent/:agentId - Estatísticas dos funis vinculados a um agente
+  fastify.get("/stats/agent/:agentId", async (request, reply) => {
+    try {
+      const { agentId } = request.params as { agentId: string };
+
+      // Buscar todos os funis vinculados a este agente (configIaId)
+      const funnels = await db.funnel.findMany({
+        where: { configIaId: agentId },
+        include: {
+          stages: {
+            orderBy: { order: "asc" },
+          },
+          leads: {
+            include: {
+              stage: true,
+            },
+          },
+          _count: {
+            select: { leads: true },
+          },
+        },
+      });
+
+      if (funnels.length === 0) {
+        return reply.send(
+          formatResponse({
+            data: {
+              totalFunnels: 0,
+              totalLeads: 0,
+              totalValue: 0,
+              wonLeads: 0,
+              wonValue: 0,
+              lostLeads: 0,
+              conversionRate: 0,
+              avgDealValue: 0,
+              leadsThisMonth: 0,
+              leadsToday: 0,
+              funnels: [],
+              stageDistribution: [],
+              monthlyTrend: [],
+              topFunnels: [],
+            },
+          })
+        );
+      }
+
+      // Calcular estatísticas gerais
+      let totalLeads = 0;
+      let totalValue = 0;
+      let wonLeads = 0;
+      let wonValue = 0;
+      let lostLeads = 0;
+      let leadsThisMonth = 0;
+      let leadsToday = 0;
+
+      const now = new Date();
+      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+      const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+      // Distribuição por estágio (agregado de todos os funis)
+      const stageDistributionMap: Record<string, { name: string; count: number; value: number; color: string }> = {};
+
+      // Dados por funil
+      const funnelStats = funnels.map((funnel) => {
+        const funnelLeads = funnel.leads || [];
+        const funnelTotalLeads = funnelLeads.length;
+        const funnelTotalValue = funnelLeads.reduce((sum, lead) => sum + (lead.value || 0), 0);
+
+        // Contar leads ganhos/perdidos
+        const funnelWonLeads = funnelLeads.filter((lead) => lead.stage?.fixedType === "won").length;
+        const funnelWonValue = funnelLeads
+          .filter((lead) => lead.stage?.fixedType === "won")
+          .reduce((sum, lead) => sum + (lead.value || 0), 0);
+        const funnelLostLeads = funnelLeads.filter((lead) => lead.stage?.fixedType === "lost").length;
+
+        // Leads deste mês e hoje
+        const funnelLeadsThisMonth = funnelLeads.filter(
+          (lead) => new Date(lead.createdAt) >= startOfMonth
+        ).length;
+        const funnelLeadsToday = funnelLeads.filter(
+          (lead) => new Date(lead.createdAt) >= startOfToday
+        ).length;
+
+        // Agregar totais
+        totalLeads += funnelTotalLeads;
+        totalValue += funnelTotalValue;
+        wonLeads += funnelWonLeads;
+        wonValue += funnelWonValue;
+        lostLeads += funnelLostLeads;
+        leadsThisMonth += funnelLeadsThisMonth;
+        leadsToday += funnelLeadsToday;
+
+        // Distribuição por estágio deste funil
+        funnel.stages.forEach((stage) => {
+          const stageLeads = funnelLeads.filter((lead) => lead.stageId === stage.id);
+          const stageKey = stage.name;
+
+          if (!stageDistributionMap[stageKey]) {
+            stageDistributionMap[stageKey] = {
+              name: stage.name,
+              count: 0,
+              value: 0,
+              color: stage.color,
+            };
+          }
+          stageDistributionMap[stageKey].count += stageLeads.length;
+          stageDistributionMap[stageKey].value += stageLeads.reduce((sum, lead) => sum + (lead.value || 0), 0);
+        });
+
+        return {
+          id: funnel.id,
+          name: funnel.name,
+          isActive: funnel.isActive,
+          totalLeads: funnelTotalLeads,
+          totalValue: funnelTotalValue,
+          wonLeads: funnelWonLeads,
+          wonValue: funnelWonValue,
+          lostLeads: funnelLostLeads,
+          conversionRate: funnelTotalLeads > 0 ? (funnelWonLeads / funnelTotalLeads) * 100 : 0,
+          rdstationPipelineId: funnel.rdstationPipelineId,
+          rdstationPipelineName: funnel.rdstationPipelineName,
+          kommoPipelineId: funnel.kommoPipelineId,
+          kommoPipelineName: funnel.kommoPipelineName,
+        };
+      });
+
+      // Calcular tendência mensal (últimos 6 meses)
+      const monthlyTrend: { month: string; leads: number; value: number; won: number }[] = [];
+      for (let i = 5; i >= 0; i--) {
+        const monthDate = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        const monthEnd = new Date(now.getFullYear(), now.getMonth() - i + 1, 0, 23, 59, 59);
+        const monthName = monthDate.toLocaleDateString("pt-BR", { month: "short", year: "2-digit" });
+
+        let monthLeads = 0;
+        let monthValue = 0;
+        let monthWon = 0;
+
+        funnels.forEach((funnel) => {
+          funnel.leads.forEach((lead) => {
+            const leadDate = new Date(lead.createdAt);
+            if (leadDate >= monthDate && leadDate <= monthEnd) {
+              monthLeads++;
+              monthValue += lead.value || 0;
+              if (lead.stage?.fixedType === "won") {
+                monthWon++;
+              }
+            }
+          });
+        });
+
+        monthlyTrend.push({
+          month: monthName,
+          leads: monthLeads,
+          value: monthValue,
+          won: monthWon,
+        });
+      }
+
+      // Converter stageDistribution para array
+      const stageDistribution = Object.values(stageDistributionMap);
+
+      // Top funis por valor
+      const topFunnels = [...funnelStats]
+        .sort((a, b) => b.totalValue - a.totalValue)
+        .slice(0, 5);
+
+      const conversionRate = totalLeads > 0 ? (wonLeads / totalLeads) * 100 : 0;
+      const avgDealValue = wonLeads > 0 ? wonValue / wonLeads : 0;
+
+      logInfo("Funnel stats for agent retrieved", {
+        agentId,
+        totalFunnels: funnels.length,
+        totalLeads,
+      });
+
+      return reply.send(
+        formatResponse({
+          data: {
+            totalFunnels: funnels.length,
+            totalLeads,
+            totalValue,
+            wonLeads,
+            wonValue,
+            lostLeads,
+            conversionRate: Math.round(conversionRate * 100) / 100,
+            avgDealValue: Math.round(avgDealValue * 100) / 100,
+            leadsThisMonth,
+            leadsToday,
+            funnels: funnelStats,
+            stageDistribution,
+            monthlyTrend,
+            topFunnels,
+          },
+        })
+      );
+    } catch (error: any) {
+      logError("Error fetching funnel stats for agent", { error: error.message });
+      return reply.code(500).send(
+        formatResponse({
+          error: "Erro ao buscar estatísticas dos funis",
+          message: error.message,
+        })
+      );
+    }
+  });
+
   // ========================================
   // FUNNEL ROUTES
   // ========================================
@@ -299,33 +729,88 @@ export default async function (fastify: FastifyInstance) {
     }
   });
 
-  // POST /funnel - Create new funnel with default stages
+  // POST /funnel - Create new funnel with stages from CRM or default stages
   fastify.post("/", async (request, reply) => {
     try {
       const data = funnelSchema.parse(request.body);
 
+      // Extrair stages, deals e webhookIds do CRM antes de criar o funil (não são campos do modelo Funnel na criação)
+      const { kommoStages, rdstationStages, rdstationDeals, rdstationWebhookIds: _, ...funnelData } = data;
+
       const funnel = await db.funnel.create({
-        data,
+        data: funnelData,
         include: { stages: true },
       });
 
-      // Create default stages
-      await createDefaultStages(funnel.id);
+      // Create stages from CRM or default stages
+      await createStagesFromCRM(funnel.id, kommoStages || [], rdstationStages || []);
 
-      // Fetch updated funnel with stages
+      // Se tiver deals do RD Station, criar leads a partir deles
+      if (rdstationDeals && rdstationDeals.length > 0) {
+        await createLeadsFromRDStationDeals(funnel.id, rdstationDeals, rdstationStages || []);
+      }
+
+      // Se funil vinculado ao RD Station e tem configIaId, criar webhooks automaticamente
+      let rdstationWebhookIds: string[] = [];
+      if (funnelData.rdstationPipelineId && funnelData.configIaId) {
+        try {
+          logInfo("Creating RD Station webhooks for funnel", {
+            funnelId: funnel.id,
+            configIaId: funnelData.configIaId,
+            pipelineId: funnelData.rdstationPipelineId,
+          });
+
+          rdstationWebhookIds = await rdstationWebhookService.createWebhooksForFunnel({
+            configIaId: funnelData.configIaId,
+            webhookUrl: "", // Usa URL padrão do serviço
+          });
+
+          // Atualizar funil com IDs dos webhooks
+          if (rdstationWebhookIds.length > 0) {
+            await db.funnel.update({
+              where: { id: funnel.id },
+              data: { rdstationWebhookIds },
+            });
+          }
+
+          logInfo("RD Station webhooks created for funnel", {
+            funnelId: funnel.id,
+            webhookIds: rdstationWebhookIds,
+          });
+        } catch (webhookError: any) {
+          // Não falhar a criação do funil se o webhook falhar
+          logWarn("Failed to create RD Station webhooks, funnel created without webhooks", {
+            funnelId: funnel.id,
+            error: webhookError.message,
+          });
+        }
+      }
+
+      // Fetch updated funnel with stages and leads
       const updatedFunnel = await db.funnel.findUnique({
         where: { id: funnel.id },
         include: {
           stages: { orderBy: { order: "asc" } },
+          leads: { orderBy: { order: "asc" } },
           configIa: { select: { id: true, nome: true, status: true } },
+          _count: { select: { leads: true } },
         },
       });
 
-      logInfo("Funnel created", { funnelId: funnel.id, userId: data.userId });
+      logInfo("Funnel created", {
+        funnelId: funnel.id,
+        userId: data.userId,
+        kommoStagesCount: kommoStages?.length || 0,
+        rdstationStagesCount: rdstationStages?.length || 0,
+        rdstationDealsCount: rdstationDeals?.length || 0,
+        rdstationWebhooksCount: rdstationWebhookIds.length,
+      });
       return reply.code(201).send(
         formatResponse({
           data: updatedFunnel,
-          message: "Funil criado com sucesso",
+          message: rdstationWebhookIds.length > 0
+            ? "Funil criado com sucesso e webhooks RD Station configurados"
+            : "Funil criado com sucesso",
         })
       );
     } catch (error: any) {
@@ -354,6 +839,90 @@ export default async function (fastify: FastifyInstance) {
       const { id } = request.params as { id: string };
       const data = updateFunnelSchema.parse(request.body);
 
+      // Buscar funil atual para verificar mudanças no RD Station
+      const currentFunnel = await db.funnel.findUnique({
+        where: { id },
+        select: {
+          rdstationPipelineId: true,
+          rdstationWebhookIds: true,
+          configIaId: true,
+        },
+      });
+
+      let webhookMessage = "";
+
+      // Verificar se o pipeline do RD Station está sendo desvinculado ou alterado
+      const isUnlinkingRdStation = currentFunnel?.rdstationPipelineId &&
+        (data.rdstationPipelineId === null || data.rdstationPipelineId === "");
+      const isChangingPipeline = currentFunnel?.rdstationPipelineId &&
+        data.rdstationPipelineId &&
+        data.rdstationPipelineId !== currentFunnel.rdstationPipelineId;
+
+      // Deletar webhooks antigos se desvinculando ou trocando pipeline
+      if ((isUnlinkingRdStation || isChangingPipeline) &&
+          currentFunnel?.rdstationWebhookIds &&
+          currentFunnel.rdstationWebhookIds.length > 0 &&
+          currentFunnel.configIaId) {
+        try {
+          logInfo("Deleting RD Station webhooks due to pipeline change", {
+            funnelId: id,
+            oldPipelineId: currentFunnel.rdstationPipelineId,
+            newPipelineId: data.rdstationPipelineId,
+            webhookIds: currentFunnel.rdstationWebhookIds,
+          });
+
+          await rdstationWebhookService.deleteWebhooks(currentFunnel.configIaId, currentFunnel.rdstationWebhookIds);
+
+          // Limpar IDs dos webhooks se desvinculando
+          if (isUnlinkingRdStation) {
+            data.rdstationWebhookIds = [];
+          }
+
+          webhookMessage = " e webhooks RD Station removidos";
+          logInfo("RD Station webhooks deleted due to pipeline change", { funnelId: id });
+        } catch (webhookError: any) {
+          logWarn("Failed to delete old RD Station webhooks", {
+            funnelId: id,
+            error: webhookError.message,
+          });
+        }
+      }
+
+      // Criar novos webhooks se vinculando a um novo pipeline
+      const isLinkingNewPipeline = data.rdstationPipelineId &&
+        (!currentFunnel?.rdstationPipelineId || isChangingPipeline);
+      const configIaId = data.configIaId || currentFunnel?.configIaId;
+
+      if (isLinkingNewPipeline && configIaId) {
+        try {
+          logInfo("Creating RD Station webhooks for new pipeline link", {
+            funnelId: id,
+            pipelineId: data.rdstationPipelineId,
+            configIaId,
+          });
+
+          const newWebhookIds = await rdstationWebhookService.createWebhooksForFunnel({
+            configIaId,
+            webhookUrl: "",
+          });
+
+          if (newWebhookIds.length > 0) {
+            data.rdstationWebhookIds = newWebhookIds;
+            webhookMessage = " e webhooks RD Station configurados";
+          }
+
+          logInfo("RD Station webhooks created for updated funnel", {
+            funnelId: id,
+            webhookIds: newWebhookIds,
+          });
+        } catch (webhookError: any) {
+          logWarn("Failed to create RD Station webhooks for updated funnel", {
+            funnelId: id,
+            error: webhookError.message,
+          });
+        }
+      }
+
       const funnel = await db.funnel.update({
         where: { id },
         data,
@@ -366,7 +935,7 @@ export default async function (fastify: FastifyInstance) {
       logInfo("Funnel updated", { funnelId: id });
       return formatResponse({
         data: funnel,
-        message: "Funil atualizado com sucesso",
+        message: `Funil atualizado com sucesso${webhookMessage}`,
       });
     } catch (error: any) {
       logError("Error updating funnel", error);
@@ -383,6 +952,38 @@ export default async function (fastify: FastifyInstance) {
   fastify.delete("/:id", async (request, reply) => {
     try {
       const { id } = request.params as { id: string };
+
+      // Buscar funil para verificar se tem webhooks do RD Station
+      const funnel = await db.funnel.findUnique({
+        where: { id },
+        select: {
+          rdstationWebhookIds: true,
+          configIaId: true,
+        },
+      });
+
+      // Deletar webhooks do RD Station antes de excluir o funil
+      if (funnel?.rdstationWebhookIds && funnel.rdstationWebhookIds.length > 0 && funnel.configIaId) {
+        try {
+          logInfo("Deleting RD Station webhooks before funnel deletion", {
+            funnelId: id,
+            webhookIds: funnel.rdstationWebhookIds,
+          });
+
+          await rdstationWebhookService.deleteWebhooks(funnel.configIaId, funnel.rdstationWebhookIds);
+
+          logInfo("RD Station webhooks deleted for funnel", {
+            funnelId: id,
+            deletedCount: funnel.rdstationWebhookIds.length,
+          });
+        } catch (webhookError: any) {
+          // Não impedir a exclusão do funil se falhar a deleção dos webhooks
+          logWarn("Failed to delete RD Station webhooks, proceeding with funnel deletion", {
+            funnelId: id,
+            error: webhookError.message,
+          });
+        }
+      }
 
       await db.funnel.delete({ where: { id } });
 
@@ -599,6 +1200,28 @@ export default async function (fastify: FastifyInstance) {
         include: { stage: true },
       });
 
+      // Sincronizar com RD Station CRM (criar deal)
+      try {
+        await rdstationDealsService.createDeal(
+          funnelId,
+          lead.id,
+          {
+            name: data.name,
+            value: data.value,
+            expectedCloseDate: data.expectedCloseDate ? new Date(data.expectedCloseDate) : null,
+            email: data.email,
+            phone: data.phone,
+          },
+          data.stageId
+        );
+      } catch (rdError: any) {
+        // Não falhar a criação do lead se a sincronização com RD Station falhar
+        logWarn("Failed to sync lead to RD Station", {
+          leadId: lead.id,
+          error: rdError.message,
+        });
+      }
+
       logInfo("Lead created", { leadId: lead.id, funnelId, whatsappJid: data.whatsappJid });
       return reply.code(201).send(
         formatResponse({
@@ -631,6 +1254,24 @@ export default async function (fastify: FastifyInstance) {
         },
         include: { stage: true },
       });
+
+      // Sincronizar com RD Station CRM (atualizar deal)
+      try {
+        await rdstationDealsService.updateDeal(
+          lead.funnelId,
+          id,
+          {
+            name: data.name,
+            value: data.value,
+            expectedCloseDate: data.expectedCloseDate ? new Date(data.expectedCloseDate) : undefined,
+          }
+        );
+      } catch (rdError: any) {
+        logWarn("Failed to sync lead update to RD Station", {
+          leadId: id,
+          error: rdError.message,
+        });
+      }
 
       logInfo("Lead updated", { leadId: id });
       return formatResponse({
@@ -666,6 +1307,17 @@ export default async function (fastify: FastifyInstance) {
         data: { lastContactAt: new Date() },
       });
 
+      // Sincronizar com RD Station CRM (mover deal para novo stage)
+      try {
+        await rdstationDealsService.moveDeal(lead.funnelId, id, stageId);
+      } catch (rdError: any) {
+        logWarn("Failed to sync lead move to RD Station", {
+          leadId: id,
+          newStageId: stageId,
+          error: rdError.message,
+        });
+      }
+
       logInfo("Lead moved", { leadId: id, newStageId: stageId });
       return formatResponse({
         data: lead,
@@ -686,6 +1338,34 @@ export default async function (fastify: FastifyInstance) {
   fastify.delete("/lead/:id", async (request, reply) => {
     try {
       const { id } = request.params as { id: string };
+
+      // Buscar lead para pegar funnelId antes de deletar
+      const lead = await db.funnelLead.findUnique({
+        where: { id },
+        select: { funnelId: true, rdstationDealId: true },
+      });
+
+      if (!lead) {
+        return reply.code(404).send(
+          formatResponse({
+            success: false,
+            error: "Lead não encontrado",
+          })
+        );
+      }
+
+      // Sincronizar com RD Station CRM (deletar deal) antes de deletar o lead
+      if (lead.rdstationDealId) {
+        try {
+          await rdstationDealsService.deleteDeal(lead.funnelId, id);
+        } catch (rdError: any) {
+          logWarn("Failed to sync lead deletion to RD Station", {
+            leadId: id,
+            dealId: lead.rdstationDealId,
+            error: rdError.message,
+          });
+        }
+      }
 
       await db.funnelLead.delete({ where: { id } });
 
