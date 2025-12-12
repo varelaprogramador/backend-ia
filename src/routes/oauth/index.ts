@@ -868,7 +868,13 @@ export default async function (fastify: FastifyInstance) {
           timeout: 30000,
         });
 
-        const deals = response.data?.deals || [];
+        // RD Station retorna { data: [...deals...] } ou { deals: [...] }
+        const deals = response.data?.data || response.data?.deals || [];
+        logInfo("RD Station deals page fetched", {
+          page: currentPage,
+          dealsInPage: deals.length,
+          responseKeys: Object.keys(response.data || {}),
+        });
         allDeals = allDeals.concat(deals);
 
         // Verificar se tem mais paginas
