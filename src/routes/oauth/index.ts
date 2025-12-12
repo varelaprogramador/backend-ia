@@ -824,13 +824,15 @@ export default async function (fastify: FastifyInstance) {
    * Listar negociações (deals) de um pipeline específico do RD Station CRM
    * Endpoint: GET /deals?pipeline_id={pipeline_id}
    * Documentação: https://developers.rdstation.com/reference/crm-v2-list-deals
+   *
+   * IMPORTANTE: Busca TODAS as páginas para retornar todos os deals do pipeline
    */
   fastify.get<{
     Params: { configIAId: string; pipelineId: string };
-    Querystring: { page?: string; limit?: string };
+    Querystring: { page?: string; limit?: string; all?: string };
   }>("/rdstation/pipelines/:pipelineId/deals/:configIAId", async (req, reply) => {
     const { configIAId, pipelineId } = req.params;
-    const { page = "1", limit = "100" } = req.query;
+    const { all = "true" } = req.query; // Por padrão busca todos
 
     try {
       const configIA = await db.configIA.findUnique({
@@ -847,23 +849,60 @@ export default async function (fastify: FastifyInstance) {
         });
       }
 
-      // RD Station CRM v2 API - listar deals de um pipeline específico
-      // Documentação: https://developers.rdstation.com/reference/crm-v2-list-deals
-      const response = await axios.get(`${RDSTATION_CRM_API_URL}/deals`, {
-        headers: {
-          Authorization: `Bearer ${configIA.rdstationAccessToken}`,
-        },
-        params: {
-          "page[number]": parseInt(page),
-          "page[size]": parseInt(limit),
-          "pipeline_id": pipelineId,
-        },
-        timeout: 15000,
+      const PAGE_SIZE = 100; // Maximo permitido pela API
+      let allDeals: any[] = [];
+      let currentPage = 1;
+      let hasMore = true;
+
+      // Buscar todas as paginas de deals
+      while (hasMore) {
+        const response = await axios.get(`${RDSTATION_CRM_API_URL}/deals`, {
+          headers: {
+            Authorization: `Bearer ${configIA.rdstationAccessToken}`,
+          },
+          params: {
+            "page[number]": currentPage,
+            "page[size]": PAGE_SIZE,
+            "pipeline_id": pipelineId,
+          },
+          timeout: 30000,
+        });
+
+        const deals = response.data?.deals || [];
+        allDeals = allDeals.concat(deals);
+
+        // Verificar se tem mais paginas
+        // Se retornou menos que PAGE_SIZE, nao tem mais paginas
+        if (deals.length < PAGE_SIZE) {
+          hasMore = false;
+        } else {
+          currentPage++;
+        }
+
+        // Limite de seguranca para evitar loop infinito (max 50 paginas = 5000 deals)
+        if (currentPage > 50) {
+          logWarn("RD Station deals pagination limit reached", {
+            pipelineId,
+            totalDeals: allDeals.length,
+            pages: currentPage
+          });
+          hasMore = false;
+        }
+      }
+
+      logInfo("RD Station deals fetched successfully", {
+        pipelineId,
+        totalDeals: allDeals.length,
+        pages: currentPage,
       });
 
       return reply.code(StatusCodes.OK).send({
         success: true,
-        data: response.data,
+        data: {
+          deals: allDeals,
+          total: allDeals.length,
+          pages: currentPage,
+        },
       });
     } catch (error: any) {
       logError("Error fetching RD Station CRM deals", {
