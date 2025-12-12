@@ -5,6 +5,7 @@ import { formatResponse } from "@/utils/response-formatter";
 import { logError, logInfo, logWarn } from "@/utils/logger";
 import { rdstationWebhookService } from "@/services/rdstation-webhook.service";
 import { rdstationDealsService } from "@/services/rdstation-deals.service";
+import { notificationService } from "@/services/notification-service";
 
 // ========================================
 // SCHEMAS
@@ -87,6 +88,7 @@ const leadSchema = z.object({
   phone: z.string().optional(),
   value: z.number().optional().default(0),
   notes: z.string().optional(),
+  contexto: z.string().optional(), // Contexto adicional para auxiliar no follow-up
   tags: z.array(z.string()).optional().default([]),
   source: z.string().optional(),
   assignedTo: z.string().optional(),
@@ -110,12 +112,12 @@ const moveLeadSchema = z.object({
 });
 
 const followUpAgentSchema = z.object({
-  name: z.string().optional().default("Agente de Follow-up"),
+  name: z.string().min(1, "Nome obrigatório"),
   isActive: z.boolean().optional().default(false),
   model: z.string().optional().default("gpt-4o-mini"),
   temperature: z.number().min(0).max(2).optional().default(0.7),
   maxTokens: z.number().min(50).max(4000).optional().default(500),
-  systemPrompt: z.string().min(1),
+  systemPrompt: z.string().min(1, "Instruções de sistema obrigatórias"),
   followUpPrompt: z.string().optional(),
   autoFollowUp: z.boolean().optional().default(false),
   followUpDelayHours: z.number().min(1).max(168).optional().default(24),
@@ -124,7 +126,7 @@ const followUpAgentSchema = z.object({
   workingHoursEnd: z.string().optional().default("18:00"),
   workingDays: z.array(z.number().min(0).max(6)).optional().default([1, 2, 3, 4, 5]),
   timezone: z.string().optional().default("America/Sao_Paulo"),
-  evolutionInstanceId: z.string().optional(),
+  evolutionInstanceId: z.string().min(1, "Instância Evolution obrigatória"),
   openaiApiKey: z.string().optional(),
   credentialId: z.string().optional(),
 });
@@ -1245,6 +1247,7 @@ export default async function (fastify: FastifyInstance) {
           phone: data.phone || null,
           value: data.value,
           notes: data.notes || null,
+          contexto: data.contexto || null,
           tags: data.tags,
           source: data.source || null,
           assignedTo: data.assignedTo || null,
@@ -1354,6 +1357,12 @@ export default async function (fastify: FastifyInstance) {
       const { id } = request.params as { id: string };
       const { stageId, order } = moveLeadSchema.parse(request.body);
 
+      // Buscar lead atual com stage anterior para notificação
+      const currentLead = await db.funnelLead.findUnique({
+        where: { id },
+        include: { stage: true, funnel: true },
+      });
+
       const lead = await db.funnelLead.update({
         where: { id },
         data: { stageId, order },
@@ -1375,6 +1384,23 @@ export default async function (fastify: FastifyInstance) {
           newStageId: stageId,
           error: rdError.message,
         });
+      }
+
+      // Enviar notificação de mudança de estágio
+      if (currentLead && currentLead.stageId !== stageId) {
+        try {
+          await notificationService.notifyLeadStageChanged({
+            userId: currentLead.funnel.userId,
+            funnelId: lead.funnelId,
+            leadId: id,
+            leadName: lead.name,
+            fromStageName: currentLead.stage?.name,
+            toStageName: lead.stage.name,
+            funnelName: currentLead.funnel.name,
+          });
+        } catch (notifError) {
+          logWarn("Failed to send notification for lead stage change", { leadId: id, error: notifError });
+        }
       }
 
       logInfo("Lead moved", { leadId: id, newStageId: stageId });
@@ -1964,6 +1990,28 @@ export default async function (fastify: FastifyInstance) {
         });
       });
 
+      // Buscar funnel para pegar userId e nome
+      const funnel = await db.funnel.findUnique({
+        where: { id: funnelId },
+        select: { userId: true, name: true },
+      });
+
+      // Enviar notificação
+      if (funnel) {
+        try {
+          await notificationService.notifyLeadAddedToFollowUp({
+            userId: funnel.userId,
+            funnelId,
+            leadId,
+            leadName: lead.name,
+            flowName: step.name,
+            funnelName: funnel.name,
+          });
+        } catch (notifError) {
+          logWarn("Failed to send notification for lead added to flow", { leadId, error: notifError });
+        }
+      }
+
       logInfo("Lead added to flow", { leadId, funnelId, stepId: targetStepId });
       return reply.code(201).send(
         formatResponse({
@@ -2264,6 +2312,20 @@ export default async function (fastify: FastifyInstance) {
         },
       });
 
+      // Enviar notificação de lead ganho
+      try {
+        await notificationService.notifyLeadMarkedWon({
+          userId: current.funnel.userId,
+          funnelId: current.funnelId,
+          leadId: current.leadId,
+          leadName: leadInFlow.lead.name,
+          value: leadInFlow.lead.value || undefined,
+          funnelName: current.funnel.name,
+        });
+      } catch (notifError) {
+        logWarn("Failed to send notification for lead marked as won", { leadFlowId, error: notifError });
+      }
+
       logInfo("Lead marked as won in flow", { leadFlowId });
       return formatResponse({
         data: leadInFlow,
@@ -2326,6 +2388,19 @@ export default async function (fastify: FastifyInstance) {
           currentStep: true,
         },
       });
+
+      // Enviar notificação de lead perdido
+      try {
+        await notificationService.notifyLeadMarkedLost({
+          userId: current.funnel.userId,
+          funnelId: current.funnelId,
+          leadId: current.leadId,
+          leadName: leadInFlow.lead.name,
+          funnelName: current.funnel.name,
+        });
+      } catch (notifError) {
+        logWarn("Failed to send notification for lead marked as lost", { leadFlowId, error: notifError });
+      }
 
       logInfo("Lead marked as lost in flow", { leadFlowId });
       return formatResponse({

@@ -4,6 +4,7 @@ import { logError, logInfo } from "@/utils/logger";
 import { db } from "@/lib/db";
 import { ENV } from "@/config/env";
 import axios from "axios";
+import { followUpFlowCronService } from "@/services/follow-up-flow-cron";
 
 // Types for Evolution API webhook
 interface EvolutionWebhookKey {
@@ -684,6 +685,26 @@ async function processWebhook(app: FastifyInstance, webhook: EvolutionWebhookBod
         ? messageContent.text.substring(0, 100)
         : "media",
     });
+
+    // Check if lead is in follow-up flow and handle response (pause flow)
+    // Only process if it's NOT a group message and message is from the lead (not from me)
+    if (!isGroup && !key.fromMe && senderId) {
+      try {
+        const followUpResult = await followUpFlowCronService.handleLeadResponse(
+          senderId,
+          instance
+        );
+        if (followUpResult.removed) {
+          logInfo("Lead removed from follow-up flow due to response", {
+            leadId: followUpResult.leadId,
+            phone: senderId,
+            instanceName: instance,
+          });
+        }
+      } catch (followUpError) {
+        logError("Error handling follow-up response", followUpError as Error);
+      }
+    }
 
     // Emit WebSocket event for real-time updates
     if (configs.configIAId) {

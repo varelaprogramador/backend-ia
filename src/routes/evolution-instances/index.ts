@@ -13,6 +13,31 @@ export default async function evolutionInstanceRoutes(
   fastify.get("/", controller.getAllInstances.bind(controller));
   fastify.get("/user/:userId", controller.getAllInstances.bind(controller));
   fastify.get("/stats/:userId", controller.getInstanceStats.bind(controller));
+
+  // GET /config-ia/:configIaId - Buscar instâncias por ConfigIA
+  fastify.get("/config-ia/:configIaId", async (request, reply) => {
+    const { configIaId } = request.params as { configIaId: string };
+
+    try {
+      const instances = await prisma.evolutionInstance.findMany({
+        where: { configIAId: configIaId },
+        orderBy: { createdAt: "desc" },
+      });
+
+      return reply.code(200).send({
+        success: true,
+        data: instances,
+      });
+    } catch (error) {
+      console.error("Error fetching instances by configIaId:", error);
+      return reply.code(500).send({
+        success: false,
+        message: "Erro ao buscar instâncias",
+        error: error instanceof Error ? error.message : "Erro desconhecido",
+      });
+    }
+  });
+
   fastify.get("/:id", controller.getInstanceById.bind(controller));
   fastify.post("/", controller.createInstance.bind(controller));
   fastify.put("/:id", controller.updateInstance.bind(controller));

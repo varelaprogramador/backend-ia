@@ -19,6 +19,7 @@ import { ENV } from "@/config/env";
 import { UserSyncService } from "@/services/user-sync";
 import { followUpFlowCronService } from "@/services/follow-up-flow-cron";
 import { rdstationTokenRefreshCronService } from "@/services/rdstation-token-refresh-cron";
+import { notificationService } from "@/services/notification-service";
 import type { BatchManager, RealtimePayload } from "@/types/IO";
 import { logError, logInfo, logWarn } from "@/utils/logger";
 import { createFilteredFastifyLogger } from "@/utils/filtered-logger";
@@ -311,6 +312,9 @@ const createLocalBatchedEmit = (io: SocketServer) => {
 // Adiciona io à instância do Fastify para uso nas rotas
 app.decorate("io", io);
 
+// Conectar Socket.IO ao NotificationService para notificações em tempo real
+notificationService.setSocketIO(io);
+
 // Eventos do Socket.IO com error handling
 io.on("connection", (socket) => {
   if (ENV.IS_DEVELOPMENT) {
@@ -322,6 +326,24 @@ io.on("connection", (socket) => {
     socket.join(room);
     if (ENV.IS_DEVELOPMENT) {
       logInfo("🚪 Cliente entrou no room", { socketId: socket.id, room });
+    }
+  });
+
+  // Handle join_user_room event - para notificações do usuário
+  socket.on("join_user_room", ({ userId }: { userId: string }) => {
+    const room = `user:${userId}`;
+    socket.join(room);
+    if (ENV.IS_DEVELOPMENT) {
+      logInfo("🔔 Cliente entrou na sala de notificações", { socketId: socket.id, userId, room });
+    }
+  });
+
+  // Handle leave_user_room event
+  socket.on("leave_user_room", ({ userId }: { userId: string }) => {
+    const room = `user:${userId}`;
+    socket.leave(room);
+    if (ENV.IS_DEVELOPMENT) {
+      logInfo("🔕 Cliente saiu da sala de notificações", { socketId: socket.id, userId, room });
     }
   });
 

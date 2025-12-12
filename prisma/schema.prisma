@@ -437,6 +437,7 @@ model FunnelLead {
   phone        String?
   value        Float?   @default(0) // Valor potencial do negócio
   notes        String?
+  contexto     String?  @db.Text // Contexto adicional para auxiliar no follow-up (ex: interesses, histórico resumido)
   tags         String[] @default([])
 
   // Metadados
@@ -657,4 +658,89 @@ model FollowUpFlowContact {
   @@index([contactedAt])
   @@index([status])
   @@map("follow_up_flow_contacts")
+}
+
+// ========================================
+// SISTEMA DE NOTIFICAÇÕES
+// ========================================
+
+model Notification {
+  id              String   @id @default(cuid())
+  userId          String   // Usuário que deve receber a notificação
+  funnelId        String?  // Funil relacionado (opcional)
+  leadId          String?  // Lead relacionado (opcional)
+
+  // Tipo e conteúdo
+  type            NotificationType
+  title           String
+  message         String
+
+  // Dados adicionais (JSON para flexibilidade)
+  metadata        Json?    // Dados extras como leadName, stepName, etc.
+
+  // Ação/Link
+  actionUrl       String?  // URL para onde direcionar quando clicar
+  actionLabel     String?  // Texto do botão de ação
+
+  // Prioridade e destaque
+  priority        NotificationPriority @default(MEDIUM)
+  isHighlighted   Boolean  @default(true)  // Se deve ser destacado visualmente
+  highlightUntil  DateTime? // Até quando manter destacado (2-3 dias)
+
+  // Status
+  isRead          Boolean  @default(false)
+  readAt          DateTime?
+  isDismissed     Boolean  @default(false)
+  dismissedAt     DateTime?
+
+  // Som
+  playSound       Boolean  @default(true) // Se deve tocar som ao chegar
+  soundPlayed     Boolean  @default(false) // Se o som já foi tocado
+
+  // Timestamps
+  createdAt       DateTime @default(now())
+  expiresAt       DateTime? // Quando a notificação expira e pode ser removida
+
+  @@index([userId])
+  @@index([funnelId])
+  @@index([leadId])
+  @@index([type])
+  @@index([isRead])
+  @@index([isDismissed])
+  @@index([createdAt])
+  @@index([highlightUntil])
+  @@map("notifications")
+}
+
+enum NotificationType {
+  // Follow-up relacionados
+  LEAD_EXITED_FOLLOWUP     // Lead saiu do fluxo de follow-up (respondeu)
+  LEAD_MARKED_WON          // Lead foi marcado como ganho
+  LEAD_MARKED_LOST         // Lead foi marcado como perdido
+  FOLLOWUP_COMPLETED       // Fluxo de follow-up completo
+  LEAD_RESPONDED           // Lead respondeu a um follow-up
+
+  // Agente relacionados
+  AGENT_ACTIVATED          // Agente foi ativado
+  AGENT_DEACTIVATED        // Agente foi desativado
+  AGENT_ERROR              // Erro no agente
+
+  // WhatsApp relacionados
+  WHATSAPP_DISCONNECTED    // WhatsApp desconectou
+  WHATSAPP_CONNECTED       // WhatsApp conectou
+
+  // Funil relacionados
+  NEW_LEAD                 // Novo lead no funil
+  LEAD_STAGE_CHANGED       // Lead mudou de estágio
+
+  // Sistema
+  SYSTEM_ALERT             // Alerta do sistema
+  SYSTEM_INFO              // Informação do sistema
+}
+
+enum NotificationPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
 }
