@@ -5,6 +5,28 @@ import { logError, logInfo, logWarn } from "@/utils/logger";
 import { formatResponse } from "@/utils/response-formatter";
 
 // ========================================
+// TIPOS PARA WEBSOCKET
+// ========================================
+
+type FunnelWebSocketEvent =
+  | "funnel:lead:created"
+  | "funnel:lead:updated"
+  | "funnel:lead:deleted"
+  | "funnel:lead:stage_changed";
+
+interface FunnelWebSocketPayload {
+  event: FunnelWebSocketEvent;
+  funnelId: string;
+  leadId: string;
+  data: {
+    lead?: any;
+    previousStageId?: string;
+    newStageId?: string;
+    rdstationDealId?: string;
+  };
+}
+
+// ========================================
 // SCHEMAS DE VALIDACAO
 // ========================================
 
@@ -13,6 +35,8 @@ const dealStageSchema = z.object({
   name: z.string(),
   nickname: z.string().optional().nullable(),
   order: z.number().optional(),
+  created_at: z.string().optional(),
+  updated_at: z.string().optional(),
 });
 
 const dealPipelineSchema = z.object({
@@ -63,8 +87,12 @@ const dealDocumentSchema = z.object({
     value: z.any(),
     custom_field: z.object({
       id: z.string(),
-      label: z.string(),
-      name: z.string(),
+      label: z.string().optional(),
+      name: z.string().optional(),
+      required: z.boolean().optional(),
+      unique: z.boolean().optional(),
+      opts: z.array(z.any()).optional(),
+      type: z.string().optional(),
     }),
   })).optional().default([]),
   deal_products: z.array(z.any()).optional().default([]),
@@ -104,14 +132,39 @@ function ratingToPriority(rating: number | null | undefined): "low" | "medium" |
 
 /**
  * Mapeia stage do RD Station para stage local do funil
- * Usa a ordem do stage para encontrar correspondencia
+ * Busca pelo rdstationStageId salvo no banco de dados
  */
 async function mapRdStageToLocalStage(
   funnelId: string,
   rdStageId: string,
   rdStageOrder?: number
 ): Promise<string | null> {
-  // Buscar todos os stages do funil local (exceto fixos)
+  // Primeiro, buscar pelo rdstationStageId (forma correta)
+  const stageByRdId = await db.funnelStage.findFirst({
+    where: {
+      funnelId,
+      rdstationStageId: rdStageId,
+      isFixed: false
+    },
+  });
+
+  if (stageByRdId) {
+    logInfo("Stage found by rdstationStageId", {
+      funnelId,
+      rdStageId,
+      localStageId: stageByRdId.id,
+      localStageName: stageByRdId.name,
+    });
+    return stageByRdId.id;
+  }
+
+  // Fallback: buscar todos os stages e mapear por ordem (compatibilidade)
+  logWarn("Stage not found by rdstationStageId, falling back to order-based mapping", {
+    funnelId,
+    rdStageId,
+    rdStageOrder,
+  });
+
   const localStages = await db.funnelStage.findMany({
     where: { funnelId, isFixed: false },
     orderBy: { order: "asc" },
@@ -142,7 +195,11 @@ async function getFixedStage(funnelId: string, type: "won" | "lost"): Promise<st
 // HANDLERS DE EVENTOS
 // ========================================
 
-async function handleDealCreated(payload: z.infer<typeof webhookPayloadSchema>, pipelineId: string) {
+async function handleDealCreated(
+  payload: z.infer<typeof webhookPayloadSchema>,
+  pipelineId: string,
+  fastify: FastifyInstance
+) {
   const document = dealDocumentSchema.parse(payload.document);
 
   // Buscar funil vinculado ao pipeline do RD Station usando o pipelineId da URL
@@ -215,7 +272,23 @@ async function handleDealCreated(payload: z.infer<typeof webhookPayloadSchema>, 
       notes: `Sincronizado via webhook - Deal ID: ${document.id}`,
       rdstationDealId: document.id,
     },
+    include: {
+      stage: true,
+    },
   });
+
+  // Emitir evento WebSocket para atualização em tempo real
+  const wsPayload: FunnelWebSocketPayload = {
+    event: "funnel:lead:created",
+    funnelId: funnel.id,
+    leadId: lead.id,
+    data: {
+      lead,
+      newStageId: stageId,
+      rdstationDealId: document.id,
+    },
+  };
+  fastify.io.to(`funnel:${funnel.id}`).emit("funnel:update", wsPayload);
 
   logInfo("Lead created from RD Station webhook", {
     leadId: lead.id,
@@ -223,10 +296,15 @@ async function handleDealCreated(payload: z.infer<typeof webhookPayloadSchema>, 
     funnelId: funnel.id,
     pipelineId,
     stageName: document.deal_stage?.name,
+    websocketEmitted: true,
   });
 }
 
-async function handleDealUpdated(payload: z.infer<typeof webhookPayloadSchema>, pipelineId: string) {
+async function handleDealUpdated(
+  payload: z.infer<typeof webhookPayloadSchema>,
+  pipelineId: string,
+  fastify: FastifyInstance
+) {
   const document = dealDocumentSchema.parse(payload.document);
 
   // Buscar lead pelo rdstationDealId
@@ -238,7 +316,7 @@ async function handleDealUpdated(payload: z.infer<typeof webhookPayloadSchema>, 
   if (!lead) {
     logInfo("No lead found for deal update, attempting to create", { dealId: document.id, pipelineId });
     // Tentar criar o lead se nao existir
-    await handleDealCreated(payload, pipelineId);
+    await handleDealCreated(payload, pipelineId, fastify);
     return;
   }
 
@@ -271,33 +349,78 @@ async function handleDealUpdated(payload: z.infer<typeof webhookPayloadSchema>, 
       updateData.stageId = lostStageId;
     }
   } else if (document.deal_stage && document.status === "ongoing") {
-    // Mapear novo stage
+    // Mapear novo stage usando rdstationStageId
+    logInfo("Attempting to map RD Station stage to local stage", {
+      funnelId: lead.funnelId,
+      rdStageId: document.deal_stage.id,
+      rdStageName: document.deal_stage.name,
+      rdStageNickname: document.deal_stage.nickname,
+      rdStageOrder: document.deal_stage.order,
+      currentLocalStageId: lead.stageId,
+    });
+
     const newStageId = await mapRdStageToLocalStage(
       lead.funnelId,
       document.deal_stage.id,
       document.deal_stage.order
     );
+
     if (newStageId && newStageId !== lead.stageId) {
       updateData.stageId = newStageId;
+      logInfo("Stage change detected", {
+        leadId: lead.id,
+        previousStageId: lead.stageId,
+        newStageId,
+        rdStageId: document.deal_stage.id,
+      });
+    } else if (!newStageId) {
+      logWarn("Could not map RD Station stage to local stage", {
+        funnelId: lead.funnelId,
+        rdStageId: document.deal_stage.id,
+      });
     }
   }
 
   // Atualizar lead
-  await db.funnelLead.update({
+  const updatedLead = await db.funnelLead.update({
     where: { id: lead.id },
     data: updateData,
+    include: {
+      stage: true,
+    },
   });
+
+  // Emitir evento WebSocket para atualização em tempo real
+  const stageChanged = !!updateData.stageId;
+  const wsPayload: FunnelWebSocketPayload = {
+    event: stageChanged ? "funnel:lead:stage_changed" : "funnel:lead:updated",
+    funnelId: lead.funnelId,
+    leadId: lead.id,
+    data: {
+      lead: updatedLead,
+      previousStageId: stageChanged ? lead.stageId : undefined,
+      newStageId: updateData.stageId,
+      rdstationDealId: document.id,
+    },
+  };
+  fastify.io.to(`funnel:${lead.funnelId}`).emit("funnel:update", wsPayload);
 
   logInfo("Lead updated from RD Station webhook", {
     leadId: lead.id,
     dealId: document.id,
     pipelineId,
     status: document.status,
+    stageChanged,
     newStageId: updateData.stageId,
+    websocketEmitted: true,
   });
 }
 
-async function handleDealDeleted(payload: z.infer<typeof webhookPayloadSchema>, pipelineId: string) {
+async function handleDealDeleted(
+  payload: z.infer<typeof webhookPayloadSchema>,
+  pipelineId: string,
+  fastify: FastifyInstance
+) {
   const document = deletedDocumentSchema.parse(payload.document);
 
   // Buscar lead pelo rdstationDealId
@@ -310,16 +433,31 @@ async function handleDealDeleted(payload: z.infer<typeof webhookPayloadSchema>, 
     return;
   }
 
+  const funnelId = lead.funnelId;
+  const leadId = lead.id;
+
   // Deletar lead e registros relacionados
   await db.funnelLead.delete({
     where: { id: lead.id },
   });
 
+  // Emitir evento WebSocket para atualização em tempo real
+  const wsPayload: FunnelWebSocketPayload = {
+    event: "funnel:lead:deleted",
+    funnelId,
+    leadId,
+    data: {
+      rdstationDealId: document.id,
+    },
+  };
+  fastify.io.to(`funnel:${funnelId}`).emit("funnel:update", wsPayload);
+
   logInfo("Lead deleted from RD Station webhook", {
-    leadId: lead.id,
+    leadId,
     dealId: document.id,
     dealName: document.name,
     pipelineId,
+    websocketEmitted: true,
   });
 }
 
@@ -355,11 +493,26 @@ export default async function (fastify: FastifyInstance) {
    */
   fastify.post("/", async (request, reply) => {
     try {
+      // Log inicial para debug
+      logInfo("Webhook POST received on dynamic route", {
+        url: request.url,
+        params: request.params,
+        headers: {
+          "content-type": request.headers["content-type"],
+          "user-agent": request.headers["user-agent"],
+        },
+      });
+
       // Extrair pipelineId da URL
-      const { pipelineId } = request.params as { pipelineId: string };
+      // Fastify autoload usa o nome da pasta com underscores: _pipelineId_ -> pipelineId_
+      const params = request.params as { pipelineId_?: string; pipelineId?: string };
+      const pipelineId = params.pipelineId_ || params.pipelineId;
 
       if (!pipelineId) {
-        logWarn("Webhook received without pipelineId");
+        logWarn("Webhook received without pipelineId", {
+          params: request.params,
+          url: request.url,
+        });
         return reply.code(400).send(
           formatResponse({
             success: false,
@@ -368,7 +521,24 @@ export default async function (fastify: FastifyInstance) {
         );
       }
 
-      const payload = webhookPayloadSchema.parse(request.body);
+      // Tentar fazer parse do payload com log de erro detalhado
+      let payload;
+      try {
+        payload = webhookPayloadSchema.parse(request.body);
+      } catch (zodError: any) {
+        logError("Webhook payload validation failed", {
+          pipelineId,
+          body: request.body,
+          zodErrors: zodError.errors,
+        });
+        // Retornar 200 para o RD Station não ficar tentando novamente
+        return reply.code(200).send(
+          formatResponse({
+            success: false,
+            error: `Invalid payload format: ${JSON.stringify(zodError.errors)}`,
+          })
+        );
+      }
 
       logInfo("RD Station CRM webhook received", {
         event: payload.event_name,
@@ -379,15 +549,15 @@ export default async function (fastify: FastifyInstance) {
 
       switch (payload.event_name) {
         case "crm_deal_created":
-          await handleDealCreated(payload, pipelineId);
+          await handleDealCreated(payload, pipelineId, fastify);
           break;
 
         case "crm_deal_updated":
-          await handleDealUpdated(payload, pipelineId);
+          await handleDealUpdated(payload, pipelineId, fastify);
           break;
 
         case "crm_deal_deleted":
-          await handleDealDeleted(payload, pipelineId);
+          await handleDealDeleted(payload, pipelineId, fastify);
           break;
 
         case "crm_lost_reason_created":
@@ -408,7 +578,8 @@ export default async function (fastify: FastifyInstance) {
         },
       });
     } catch (error: any) {
-      const { pipelineId } = request.params as { pipelineId?: string };
+      const params = request.params as { pipelineId_?: string; pipelineId?: string };
+      const pipelineId = params.pipelineId_ || params.pipelineId;
 
       logError("Error processing RD Station webhook", {
         error: error.message,
@@ -429,11 +600,36 @@ export default async function (fastify: FastifyInstance) {
   });
 
   /**
+   * Rota de teste para verificar se o webhook está funcionando
+   * POST /webhooks/:pipelineId/rdstation/teste
+   */
+  fastify.post("/teste", async (request) => {
+    const params = request.params as { pipelineId_?: string; pipelineId?: string };
+    const pipelineId = params.pipelineId_ || params.pipelineId;
+
+    logInfo("Webhook test received", {
+      pipelineId,
+      body: request.body,
+      headers: request.headers,
+    });
+
+    return formatResponse({
+      message: "Webhook test received successfully",
+      data: {
+        pipelineId,
+        receivedAt: new Date().toISOString(),
+        body: request.body,
+      },
+    });
+  });
+
+  /**
    * Health check para o webhook com pipelineId
    * Util para verificar se o endpoint esta ativo
    */
   fastify.get("/health", async (request) => {
-    const { pipelineId } = request.params as { pipelineId: string };
+    const params = request.params as { pipelineId_?: string; pipelineId?: string };
+    const pipelineId = params.pipelineId_ || params.pipelineId;
 
     // Verificar se existe funil vinculado a esse pipeline
     const funnel = await db.funnel.findFirst({
