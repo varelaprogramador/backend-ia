@@ -125,12 +125,16 @@ export class RDStationWebhookService {
    * Retorna os IDs dos webhooks criados
    * Formato API v2: { "data": { "event_name": "crm_deal_created" }, "name": "..." }
    */
-  async createWebhooksForFunnel(params: CreateWebhookParams): Promise<string[]> {
+  async createWebhooksForFunnel(
+    params: CreateWebhookParams
+  ): Promise<string[]> {
     const { configIaId, webhookUrl, agentName, funnelId, pipelineId } = params;
 
     const accessToken = await this.getAccessToken(configIaId);
     if (!accessToken) {
-      throw new Error("RD Station não está conectado. Autorize primeiro nas configurações do agente.");
+      throw new Error(
+        "RD Station não está conectado. Autorize primeiro nas configurações do agente."
+      );
     }
 
     // Usar URL customizada, ou gerar com pipelineId, ou fallback para URL antiga
@@ -138,9 +142,10 @@ export class RDStationWebhookService {
     const createdWebhookIds: string[] = [];
 
     // Gera o nome do webhook: "agentName + funnelId"
-    const webhookBaseName = agentName && funnelId
-      ? `${agentName} - ${funnelId}`
-      : agentName || funnelId || "EAD10 Webhook";
+    const webhookBaseName =
+      agentName && funnelId
+        ? `${agentName} - ${funnelId}`
+        : agentName || funnelId || "EAD10 Webhook";
 
     logInfo("Creating RD Station webhooks", {
       configIaId,
@@ -163,7 +168,6 @@ export class RDStationWebhookService {
           {
             data: {
               url,
-              name: webhookName,
               event_name: eventType,
               http_method: "POST",
             },
@@ -191,9 +195,18 @@ export class RDStationWebhookService {
         }
       } catch (error: any) {
         // Se o webhook ja existe, tentar buscar o ID existente
-        if (error.response?.status === 422 || error.response?.data?.error?.includes("already exists")) {
-          logInfo("Webhook may already exist, trying to find existing", { eventType });
-          const existingId = await this.findExistingWebhook(accessToken, url, eventType);
+        if (
+          error.response?.status === 422 ||
+          error.response?.data?.error?.includes("already exists")
+        ) {
+          logInfo("Webhook may already exist, trying to find existing", {
+            eventType,
+          });
+          const existingId = await this.findExistingWebhook(
+            accessToken,
+            url,
+            eventType
+          );
           if (existingId) {
             createdWebhookIds.push(existingId);
           }
@@ -235,7 +248,11 @@ export class RDStationWebhookService {
       logInfo("Searching for existing webhook", {
         targetUrl: url,
         targetEventType: eventType,
-        existingWebhooks: webhooks.map(w => ({ id: w.id, url: w.url, event_type: w.event_type })),
+        existingWebhooks: webhooks.map((w) => ({
+          id: w.id,
+          url: w.url,
+          event_type: w.event_type,
+        })),
       });
 
       // Primeiro tenta encontrar com URL exata
@@ -331,7 +348,10 @@ export class RDStationWebhookService {
   /**
    * Deleta multiplos webhooks
    */
-  async deleteWebhooks(configIaId: string, webhookIds: string[]): Promise<void> {
+  async deleteWebhooks(
+    configIaId: string,
+    webhookIds: string[]
+  ): Promise<void> {
     for (const webhookId of webhookIds) {
       await this.deleteWebhook(configIaId, webhookId);
     }
@@ -368,7 +388,10 @@ export class RDStationWebhookService {
   /**
    * Verifica se os webhooks estao configurados corretamente
    */
-  async verifyWebhooks(configIaId: string, pipelineId?: string): Promise<{
+  async verifyWebhooks(
+    configIaId: string,
+    pipelineId?: string
+  ): Promise<{
     isConfigured: boolean;
     missingEvents: string[];
     configuredEvents: string[];
@@ -426,9 +449,10 @@ export class RDStationWebhookService {
     const createdIds: string[] = [];
 
     // Gera o nome do webhook: "agentName + funnelId"
-    const webhookBaseName = agentName && funnelId
-      ? `${agentName} - ${funnelId}`
-      : agentName || funnelId || "EAD10 Webhook";
+    const webhookBaseName =
+      agentName && funnelId
+        ? `${agentName} - ${funnelId}`
+        : agentName || funnelId || "EAD10 Webhook";
 
     for (const eventType of verification.missingEvents) {
       try {
