@@ -29,17 +29,42 @@ interface CreateWebhookParams {
   pipelineId?: string; // ID do pipeline do RD Station para URL dinâmica
 }
 
+interface WebhookData {
+  id: string;
+  name?: string;
+  url: string;
+  http_method: string;
+  event_name?: string;
+  entity_type?: string;
+  event_type?: string;
+  status?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+// Resposta da API do RD Station para criação de webhook
+// A API retorna { data: { id, name, ... } }
 interface WebhookResponse {
+  data?: WebhookData;
+  // Fallback para caso a API retorne diretamente os dados
+  id?: string;
+  url?: string;
+  http_method?: string;
+  event_type?: string;
+}
+
+// Estrutura de webhook retornada na listagem
+interface ListedWebhook {
   id: string;
   url: string;
   http_method: string;
-  entity_type: string;
   event_type: string;
+  entity_type?: string;
   created_at?: string;
 }
 
 interface ListWebhooksResponse {
-  webhooks: WebhookResponse[];
+  webhooks: ListedWebhook[];
 }
 
 export class RDStationWebhookService {
@@ -152,10 +177,13 @@ export class RDStationWebhookService {
           }
         );
 
-        if (response.data?.id) {
-          createdWebhookIds.push(response.data.id);
+        // A resposta do RD Station vem em { data: { id, name, ... } }
+        // O axios já unwrappa o primeiro 'data', então acessamos response.data.data
+        const webhookData = response.data?.data || response.data;
+        if (webhookData?.id) {
+          createdWebhookIds.push(webhookData.id);
           logInfo("RD Station webhook created", {
-            webhookId: response.data.id,
+            webhookId: webhookData.id,
             webhookName,
             eventType,
             url,
@@ -238,7 +266,7 @@ export class RDStationWebhookService {
   /**
    * Lista todos os webhooks configurados
    */
-  async listWebhooks(configIaId: string): Promise<WebhookResponse[]> {
+  async listWebhooks(configIaId: string): Promise<ListedWebhook[]> {
     const accessToken = await this.getAccessToken(configIaId);
     if (!accessToken) {
       return [];

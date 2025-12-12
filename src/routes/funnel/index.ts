@@ -809,7 +809,7 @@ export default async function (fastify: FastifyInstance) {
           return reply.code(503).send(
             formatResponse({
               success: false,
-              error: `Erro ao criar webhooks no RD Station: ${webhookError.message}. O RD Station pode estar com instabilidade. Tente novamente em alguns minutos ou crie o funil sem vincular ao RD Station.`,
+              error: `Erro ao criar webhooks no RD Station. Tente novamente em alguns minutos ou crie o funil sem vincular ao RD Station.`,
             })
           );
         }
