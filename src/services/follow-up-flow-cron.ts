@@ -75,7 +75,8 @@ export class FollowUpFlowCronService {
         take: limit,
         select: {
           message: true,
-          sender: true,
+          direction: true,
+          timestamp: true,
         },
       });
 
@@ -84,7 +85,7 @@ export class FollowUpFlowCronService {
 
       // Adicionar mensagens do MyMessages
       for (const msg of myMessages) {
-        if (msg.message && msg.message.trim()) {
+        if (msg.message && msg.message.trim() && msg.timestamp) {
           messages.push({
             role: msg.direction === "received" ? "user" : "assistant",
             content: msg.message,
@@ -97,9 +98,9 @@ export class FollowUpFlowCronService {
       for (const msg of chatMemory) {
         if (msg.message && msg.message.trim()) {
           messages.push({
-            role: msg.sender === "user" ? "user" : "assistant",
+            role: msg.direction === "input" ? "user" : "assistant",
             content: msg.message,
-            timestamp: new Date(), // n8nChatMemory não tem timestamp específico
+            timestamp: msg.timestamp || new Date(),
           });
         }
       }
