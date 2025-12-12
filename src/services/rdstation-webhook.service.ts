@@ -26,6 +26,7 @@ interface CreateWebhookParams {
   webhookUrl: string;
   agentName?: string;
   funnelId?: string;
+  pipelineId?: string; // ID do pipeline do RD Station para URL dinâmica
 }
 
 interface WebhookResponse {
@@ -77,11 +78,20 @@ export class RDStationWebhookService {
 
   /**
    * Gera a URL do webhook baseado no ambiente
+   * @param pipelineId - ID do pipeline do RD Station (opcional, usa formato antigo se não fornecido)
    */
-  private getWebhookUrl(): string {
+  private getWebhookUrl(pipelineId?: string): string {
     // Em producao, usar a URL configurada
     // Em desenvolvimento, pode usar ngrok ou similar
     const baseUrl = ENV.APP_URL || "http://localhost:3333";
+
+    // Se temos pipelineId, usar novo formato com rota dinâmica
+    // Formato: /webhooks/[pipelineId]/rdstation
+    if (pipelineId) {
+      return `${baseUrl}/webhooks/${pipelineId}/rdstation`;
+    }
+
+    // Fallback para formato antigo (compatibilidade)
     return `${baseUrl}/webhooks/rdstation-crm`;
   }
 
@@ -91,14 +101,15 @@ export class RDStationWebhookService {
    * Formato API v2: { "data": { "event_name": "crm_deal_created" }, "name": "..." }
    */
   async createWebhooksForFunnel(params: CreateWebhookParams): Promise<string[]> {
-    const { configIaId, webhookUrl, agentName, funnelId } = params;
+    const { configIaId, webhookUrl, agentName, funnelId, pipelineId } = params;
 
     const accessToken = await this.getAccessToken(configIaId);
     if (!accessToken) {
       throw new Error("RD Station não está conectado. Autorize primeiro nas configurações do agente.");
     }
 
-    const url = webhookUrl || this.getWebhookUrl();
+    // Usar URL customizada, ou gerar com pipelineId, ou fallback para URL antiga
+    const url = webhookUrl || this.getWebhookUrl(pipelineId);
     const createdWebhookIds: string[] = [];
 
     // Gera o nome do webhook: "agentName + funnelId"
@@ -110,6 +121,7 @@ export class RDStationWebhookService {
       configIaId,
       webhookUrl: url,
       webhookBaseName,
+      pipelineId,
       events: DEAL_EVENTS,
     });
 
@@ -328,13 +340,13 @@ export class RDStationWebhookService {
   /**
    * Verifica se os webhooks estao configurados corretamente
    */
-  async verifyWebhooks(configIaId: string): Promise<{
+  async verifyWebhooks(configIaId: string, pipelineId?: string): Promise<{
     isConfigured: boolean;
     missingEvents: string[];
     configuredEvents: string[];
   }> {
     const webhooks = await this.listWebhooks(configIaId);
-    const webhookUrl = this.getWebhookUrl();
+    const webhookUrl = this.getWebhookUrl(pipelineId);
 
     const configuredEvents = webhooks
       .filter((w) => w.url === webhookUrl)
@@ -358,9 +370,10 @@ export class RDStationWebhookService {
   async ensureWebhooksConfigured(
     configIaId: string,
     agentName?: string,
-    funnelId?: string
+    funnelId?: string,
+    pipelineId?: string
   ): Promise<string[]> {
-    const verification = await this.verifyWebhooks(configIaId);
+    const verification = await this.verifyWebhooks(configIaId, pipelineId);
 
     if (verification.isConfigured) {
       logInfo("RD Station webhooks already configured", {
@@ -381,7 +394,7 @@ export class RDStationWebhookService {
       throw new Error("RD Station não está conectado");
     }
 
-    const webhookUrl = this.getWebhookUrl();
+    const webhookUrl = this.getWebhookUrl(pipelineId);
     const createdIds: string[] = [];
 
     // Gera o nome do webhook: "agentName + funnelId"

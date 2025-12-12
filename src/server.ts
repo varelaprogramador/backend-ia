@@ -370,8 +370,14 @@ app.register(cors, {
 
 // Configuração de CORS específica para webhooks (permite qualquer origem)
 app.addHook("onRequest", async (request, reply) => {
-  // Verificar se a requisição é para webhook (automations ou rdstation-crm)
-  if (request.url.startsWith("/webhooks/automations") || request.url.startsWith("/webhooks/rdstation-crm")) {
+  // Verificar se a requisição é para webhook (automations, rdstation-crm ou nova rota dinâmica)
+  // Nova rota: /webhooks/:pipelineId/rdstation
+  const isWebhookRoute =
+    request.url.startsWith("/webhooks/automations") ||
+    request.url.startsWith("/webhooks/rdstation-crm") ||
+    /^\/webhooks\/[^/]+\/rdstation/.test(request.url);
+
+  if (isWebhookRoute) {
     // Remover headers CORS existentes
     reply.removeHeader("Access-Control-Allow-Origin");
     reply.removeHeader("Access-Control-Allow-Credentials");

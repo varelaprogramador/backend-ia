@@ -771,9 +771,10 @@ export default async function (fastify: FastifyInstance) {
 
           rdstationWebhookIds = await rdstationWebhookService.createWebhooksForFunnel({
             configIaId: funnelData.configIaId,
-            webhookUrl: "", // Usa URL padrão do serviço
+            webhookUrl: "", // Usa URL padrão do serviço com pipelineId
             agentName: configIa?.nome,
             funnelId: funnel.id,
+            pipelineId: funnelData.rdstationPipelineId, // Usado para gerar URL dinâmica
           });
 
           // Se nenhum webhook foi criado, é um erro crítico
@@ -948,9 +949,10 @@ export default async function (fastify: FastifyInstance) {
 
           const newWebhookIds = await rdstationWebhookService.createWebhooksForFunnel({
             configIaId,
-            webhookUrl: "",
+            webhookUrl: "", // Usa URL padrão do serviço com pipelineId
             agentName: configIa?.nome,
             funnelId: id,
+            pipelineId: data.rdstationPipelineId || undefined, // Usado para gerar URL dinâmica
           });
 
           // Se nenhum webhook foi criado, é um erro crítico
