@@ -27,7 +27,7 @@ const rdstationStageSchema = z.object({
 });
 
 // Schema para deals do RD Station
-// Status do RD Station: won (ganho), lost (perdido), ongoing (em andamento)
+// Status do RD Station: won (ganho), lost (perdido), ongoing (em andamento), paused (pausado)
 const rdstationDealSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -36,7 +36,7 @@ const rdstationDealSchema = z.object({
   total_price: z.number().optional(),
   expected_close_date: z.string().optional().nullable(),
   rating: z.number().optional(),
-  status: z.enum(["won", "lost", "pending", "ongoing"]).optional(),
+  status: z.enum(["won", "lost", "pending", "ongoing", "paused"]).optional(),
   pipeline_id: z.string(),
   stage_id: z.string(),
   owner_id: z.string().optional().nullable(),
@@ -197,7 +197,7 @@ interface RDStationStage {
 }
 
 // Tipo para deals do RD Station
-// Status do RD Station: won (ganho), lost (perdido), ongoing (em andamento)
+// Status do RD Station: won (ganho), lost (perdido), ongoing (em andamento), paused (pausado)
 interface RDStationDeal {
   id: string;
   name: string;
@@ -206,7 +206,7 @@ interface RDStationDeal {
   total_price?: number;
   expected_close_date?: string | null;
   rating?: number;
-  status?: "won" | "lost" | "pending" | "ongoing";
+  status?: "won" | "lost" | "pending" | "ongoing" | "paused";
   pipeline_id: string;
   stage_id: string;
   owner_id?: string | null;
