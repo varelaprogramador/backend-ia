@@ -700,11 +700,23 @@ export default async function (fastify: FastifyInstance) {
         };
 
         // Se contactId especificado, filtrar por ele
+        // Para grupos (@g.us), filtrar pelo chatId
+        // Para privados, filtrar por senderId ou chatId
         if (contactId) {
-          where.OR = [{ senderId: contactId }, { chatId: contactId }];
-          console.log(
-            `🎯 [DEBUG] Filtrando mensagens para contato: ${contactId}`
-          );
+          const isGroupContact = contactId.includes('@g.us');
+          if (isGroupContact) {
+            // Para grupos, buscar todas as mensagens desse chatId
+            where.chatId = contactId;
+            console.log(
+              `🎯 [DEBUG] Filtrando mensagens para GRUPO: ${contactId}`
+            );
+          } else {
+            // Para conversas privadas, buscar por senderId ou chatId
+            where.OR = [{ senderId: contactId }, { chatId: contactId }];
+            console.log(
+              `🎯 [DEBUG] Filtrando mensagens para contato privado: ${contactId}`
+            );
+          }
         }
 
         console.log(`🔍 [DEBUG] Query WHERE:`, JSON.stringify(where, null, 2));
@@ -842,13 +854,13 @@ export default async function (fastify: FastifyInstance) {
         );
 
         // Buscar contatos em ambas as tabelas: myMessages e n8nChatMemory
+        // Para grupos, usamos chatId como identificador; para privados, usamos senderId
         const [myMessagesContacts, n8nContacts] = await Promise.all([
-          // Buscar em MyMessages
+          // Buscar em MyMessages - agrupando por chatId para incluir grupos
           db.myMessages.findMany({
             where: {
               instanceName: { in: instanceNames },
-              senderId: { not: null },
-              senderName: { not: null },
+              chatId: { not: null },
             },
             select: {
               senderId: true,
@@ -858,15 +870,14 @@ export default async function (fastify: FastifyInstance) {
               timestamp: true,
             },
             orderBy: { timestamp: "desc" },
-            distinct: ["senderId"],
+            distinct: ["chatId"],
           }),
-          
-          // Buscar em N8nChatMemory
+
+          // Buscar em N8nChatMemory - agrupando por chatId para incluir grupos
           db.n8nChatMemory.findMany({
             where: {
               instanceName: { in: instanceNames },
-              senderId: { not: null },
-              senderName: { not: null },
+              chatId: { not: null },
             },
             select: {
               senderId: true,
@@ -876,7 +887,7 @@ export default async function (fastify: FastifyInstance) {
               timestamp: true,
             },
             orderBy: { timestamp: "desc" },
-            distinct: ["senderId"],
+            distinct: ["chatId"],
           })
         ]);
 
@@ -893,22 +904,34 @@ export default async function (fastify: FastifyInstance) {
         const allContacts = [...myMessagesContacts, ...n8nContacts];
 
         // Agrupar contatos únicos com última mensagem (removendo duplicatas entre as tabelas)
+        // Para grupos: usar chatId como identificador único
+        // Para privados: usar chatId (que é igual ao senderId)
         const uniqueContacts = allContacts.reduce((acc: any[], contact) => {
-          const existing = acc.find((c) => c.senderId === contact.senderId);
+          // Usar chatId como identificador único (funciona tanto para grupos quanto privados)
+          const contactKey = contact.chatId;
+          const existing = acc.find((c) => c.contactId === contactKey);
+
           if (!existing) {
+            // Para grupos, o nome do contato deve ser o nome do grupo (chatId contém @g.us)
+            const isGroup = contact.isGroup || (contact.chatId && contact.chatId.includes('@g.us'));
+
             acc.push({
-              contactId: contact.senderId,
-              contactName: contact.senderName,
+              contactId: contactKey, // Usar chatId como contactId
+              contactName: isGroup
+                ? (contact.senderName || contact.chatId?.split('@')[0] || 'Grupo')
+                : (contact.senderName || contact.senderId || 'Desconhecido'),
               chatId: contact.chatId,
-              isGroup: contact.isGroup || false,
+              isGroup: isGroup,
               lastMessageTime: contact.timestamp,
             });
           } else {
             // Se já existe, manter a mensagem mais recente
             if (contact.timestamp && (!existing.lastMessageTime || contact.timestamp > existing.lastMessageTime)) {
               existing.lastMessageTime = contact.timestamp;
-              existing.contactName = contact.senderName; // Atualizar nome se mais recente
-              existing.chatId = contact.chatId; // Atualizar chatId se mais recente
+              // Não atualizar o nome para grupos já identificados
+              if (!existing.isGroup) {
+                existing.contactName = contact.senderName;
+              }
             }
           }
           return acc;
