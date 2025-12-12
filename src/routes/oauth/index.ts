@@ -9,7 +9,6 @@ import { logError, logInfo } from "@/utils/logger";
 const RDSTATION_TOKEN_URL = "https://api.rd.services/oauth2/token";
 const RDSTATION_CRM_API_URL = "https://api.rd.services/crm/v2";
 
-
 export default async function (fastify: FastifyInstance) {
   /**
    * RD Station CRM v2 OAuth Callback
@@ -399,7 +398,8 @@ export default async function (fastify: FastifyInstance) {
         where: { id: configIAId },
         data: {
           rdstationAccessToken: access_token,
-          rdstationRefreshToken: refresh_token || configIA.rdstationRefreshToken,
+          rdstationRefreshToken:
+            refresh_token || configIA.rdstationRefreshToken,
         },
       });
 
@@ -761,64 +761,67 @@ export default async function (fastify: FastifyInstance) {
    */
   fastify.get<{
     Params: { configIAId: string; pipelineId: string };
-  }>("/rdstation/pipelines/:pipelineId/stages/:configIAId", async (req, reply) => {
-    const { configIAId, pipelineId } = req.params;
+  }>(
+    "/rdstation/pipelines/:pipelineId/stages/:configIAId",
+    async (req, reply) => {
+      const { configIAId, pipelineId } = req.params;
 
-    try {
-      const configIA = await db.configIA.findUnique({
-        where: { id: configIAId },
-        select: {
-          rdstationAccessToken: true,
-        },
-      });
-
-      if (!configIA?.rdstationAccessToken) {
-        return reply.code(StatusCodes.UNAUTHORIZED).send({
-          success: false,
-          error: "RD Station CRM não conectado",
+      try {
+        const configIA = await db.configIA.findUnique({
+          where: { id: configIAId },
+          select: {
+            rdstationAccessToken: true,
+          },
         });
-      }
 
-      // RD Station CRM v2 API - listar stages de um pipeline específico
-      // Documentação: https://developers.rdstation.com/reference/crm-v2-list-stages
-      const response = await axios.get(
-        `${RDSTATION_CRM_API_URL}/pipelines/${pipelineId}/stages`,
-        {
-          headers: {
-            Authorization: `Bearer ${configIA.rdstationAccessToken}`,
-          },
-          params: {
-            "page[number]": 1,
-            "page[size]": 100, // Buscar até 100 estágios
-          },
-          timeout: 15000,
+        if (!configIA?.rdstationAccessToken) {
+          return reply.code(StatusCodes.UNAUTHORIZED).send({
+            success: false,
+            error: "RD Station CRM não conectado",
+          });
         }
-      );
 
-      return reply.code(StatusCodes.OK).send({
-        success: true,
-        data: response.data,
-      });
-    } catch (error: any) {
-      logError("Error fetching RD Station CRM pipeline stages", {
-        error: error.message,
-        pipelineId,
-        response: error.response?.data,
-      });
+        // RD Station CRM v2 API - listar stages de um pipeline específico
+        // Documentação: https://developers.rdstation.com/reference/crm-v2-list-stages
+        const response = await axios.get(
+          `${RDSTATION_CRM_API_URL}/pipelines/${pipelineId}/stages`,
+          {
+            headers: {
+              Authorization: `Bearer ${configIA.rdstationAccessToken}`,
+            },
+            params: {
+              "page[number]": 1,
+              "page[size]": 100, // Buscar até 100 estágios
+            },
+            timeout: 15000,
+          }
+        );
 
-      if (error.response?.status === 401) {
-        return reply.code(StatusCodes.UNAUTHORIZED).send({
+        return reply.code(StatusCodes.OK).send({
+          success: true,
+          data: response.data,
+        });
+      } catch (error: any) {
+        logError("Error fetching RD Station CRM pipeline stages", {
+          error: error.message,
+          pipelineId,
+          response: error.response?.data,
+        });
+
+        if (error.response?.status === 401) {
+          return reply.code(StatusCodes.UNAUTHORIZED).send({
+            success: false,
+            error: "Token inválido ou expirado",
+          });
+        }
+
+        return reply.code(StatusCodes.INTERNAL_SERVER_ERROR).send({
           success: false,
-          error: "Token inválido ou expirado",
+          error: "Erro ao buscar etapas do funil do RD Station CRM",
         });
       }
-
-      return reply.code(StatusCodes.INTERNAL_SERVER_ERROR).send({
-        success: false,
-        error: "Erro ao buscar etapas do funil do RD Station CRM",
-      });
     }
-  });
+  );
 
   /**
    * Listar negociações (deals) de um pipeline específico do RD Station CRM
@@ -830,106 +833,104 @@ export default async function (fastify: FastifyInstance) {
   fastify.get<{
     Params: { configIAId: string; pipelineId: string };
     Querystring: { page?: string; limit?: string; all?: string };
-  }>("/rdstation/pipelines/:pipelineId/deals/:configIAId", async (req, reply) => {
-    const { configIAId, pipelineId } = req.params;
-    const { all = "true" } = req.query; // Por padrão busca todos
+  }>(
+    "/rdstation/pipelines/:pipelineId/deals/:configIAId",
+    async (req, reply) => {
+      const { configIAId, pipelineId } = req.params;
+      const { all = "true" } = req.query; // Por padrão busca todos
 
-    try {
-      const configIA = await db.configIA.findUnique({
-        where: { id: configIAId },
-        select: {
-          rdstationAccessToken: true,
-        },
-      });
-
-      if (!configIA?.rdstationAccessToken) {
-        return reply.code(StatusCodes.UNAUTHORIZED).send({
-          success: false,
-          error: "RD Station CRM não conectado",
-        });
-      }
-
-      const PAGE_SIZE = 100; // Maximo permitido pela API
-      let allDeals: any[] = [];
-      let currentPage = 1;
-      let hasMore = true;
-
-      // Buscar todas as paginas de deals
-      while (hasMore) {
-        const response = await axios.get(`${RDSTATION_CRM_API_URL}/deals`, {
-          headers: {
-            Authorization: `Bearer ${configIA.rdstationAccessToken}`,
+      try {
+        const configIA = await db.configIA.findUnique({
+          where: { id: configIAId },
+          select: {
+            rdstationAccessToken: true,
           },
-          params: {
-            "page[number]": currentPage,
-            "page[size]": PAGE_SIZE,
-            "pipeline_id": pipelineId,
-          },
-          timeout: 30000,
         });
 
-        // RD Station retorna { data: [...deals...] } ou { deals: [...] }
-        const deals = response.data?.data || response.data?.deals || [];
-        logInfo("RD Station deals page fetched", {
-          page: currentPage,
-          dealsInPage: deals.length,
-          responseKeys: Object.keys(response.data || {}),
-        });
-        allDeals = allDeals.concat(deals);
-
-        // Verificar se tem mais paginas
-        // Se retornou menos que PAGE_SIZE, nao tem mais paginas
-        if (deals.length < PAGE_SIZE) {
-          hasMore = false;
-        } else {
-          currentPage++;
-        }
-
-        // Limite de seguranca para evitar loop infinito (max 50 paginas = 5000 deals)
-        if (currentPage > 50) {
-          logWarn("RD Station deals pagination limit reached", {
-            pipelineId,
-            totalDeals: allDeals.length,
-            pages: currentPage
+        if (!configIA?.rdstationAccessToken) {
+          return reply.code(StatusCodes.UNAUTHORIZED).send({
+            success: false,
+            error: "RD Station CRM não conectado",
           });
-          hasMore = false;
         }
-      }
 
-      logInfo("RD Station deals fetched successfully", {
-        pipelineId,
-        totalDeals: allDeals.length,
-        pages: currentPage,
-      });
+        const PAGE_SIZE = 100; // Maximo permitido pela API
+        let allDeals: any[] = [];
+        let currentPage = 1;
+        let hasMore = true;
 
-      return reply.code(StatusCodes.OK).send({
-        success: true,
-        data: {
-          deals: allDeals,
-          total: allDeals.length,
+        // Buscar todas as paginas de deals
+        while (hasMore) {
+          const response = await axios.get(`${RDSTATION_CRM_API_URL}/deals`, {
+            headers: {
+              Authorization: `Bearer ${configIA.rdstationAccessToken}`,
+            },
+            params: {
+              "page[number]": currentPage,
+              "page[size]": PAGE_SIZE,
+              pipeline_id: pipelineId,
+            },
+            timeout: 30000,
+          });
+
+          // RD Station retorna { data: [...deals...] } ou { deals: [...] }
+          const deals = response.data?.data || response.data?.deals || [];
+          logInfo("RD Station deals page fetched", {
+            page: currentPage,
+            dealsInPage: deals.length,
+            responseKeys: Object.keys(response.data || {}),
+          });
+          allDeals = allDeals.concat(deals);
+
+          // Verificar se tem mais paginas
+          // Se retornou menos que PAGE_SIZE, nao tem mais paginas
+          if (deals.length < PAGE_SIZE) {
+            hasMore = false;
+          } else {
+            currentPage++;
+          }
+
+          // Limite de seguranca para evitar loop infinito (max 50 paginas = 5000 deals)
+          if (currentPage > 50) {
+            hasMore = false;
+          }
+        }
+
+        logInfo("RD Station deals fetched successfully", {
+          pipelineId,
+          totalDeals: allDeals.length,
           pages: currentPage,
-        },
-      });
-    } catch (error: any) {
-      logError("Error fetching RD Station CRM deals", {
-        error: error.message,
-        pipelineId,
-        response: error.response?.data,
-      });
+        });
 
-      if (error.response?.status === 401) {
-        return reply.code(StatusCodes.UNAUTHORIZED).send({
+        return reply.code(StatusCodes.OK).send({
+          success: true,
+          data: {
+            deals: allDeals,
+            total: allDeals.length,
+            pages: currentPage,
+          },
+        });
+      } catch (error: any) {
+        logError("Error fetching RD Station CRM deals", {
+          error: error.message,
+          pipelineId,
+          response: error.response?.data,
+        });
+
+        if (error.response?.status === 401) {
+          return reply.code(StatusCodes.UNAUTHORIZED).send({
+            success: false,
+            error: "Token inválido ou expirado",
+          });
+        }
+
+        return reply.code(StatusCodes.INTERNAL_SERVER_ERROR).send({
           success: false,
-          error: "Token inválido ou expirado",
+          error: "Erro ao buscar negociações do RD Station CRM",
         });
       }
-
-      return reply.code(StatusCodes.INTERNAL_SERVER_ERROR).send({
-        success: false,
-        error: "Erro ao buscar negociações do RD Station CRM",
-      });
     }
-  });
+  );
 
   /**
    * Listar pipelines/funis do RD Station CRM
@@ -964,11 +965,20 @@ export default async function (fastify: FastifyInstance) {
       }
 
       // Se tem code mas não tem accessToken, tentar fazer o token exchange
-      if (!configIA.rdstationAccessToken && configIA.rdstationCode && configIA.rdstationClientId && configIA.rdstationClientSecret) {
-        logInfo("Attempting automatic token exchange for RD Station", { configIAId });
+      if (
+        !configIA.rdstationAccessToken &&
+        configIA.rdstationCode &&
+        configIA.rdstationClientId &&
+        configIA.rdstationClientSecret
+      ) {
+        logInfo("Attempting automatic token exchange for RD Station", {
+          configIAId,
+        });
 
         // Determinar o redirectUri para o token exchange
-        const exchangeRedirectUri = redirectUri || `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/api/rdstation/callback`;
+        const exchangeRedirectUri =
+          redirectUri ||
+          `${process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"}/api/rdstation/callback`;
 
         try {
           const tokenResponse = await axios.post(
@@ -1000,7 +1010,9 @@ export default async function (fastify: FastifyInstance) {
               },
             });
 
-            logInfo("RD Station automatic token exchange successful", { configIAId });
+            logInfo("RD Station automatic token exchange successful", {
+              configIAId,
+            });
 
             // Atualizar o objeto local para continuar com a busca de pipelines
             configIA = { ...configIA, rdstationAccessToken: access_token };
@@ -1017,7 +1029,8 @@ export default async function (fastify: FastifyInstance) {
       if (!configIA.rdstationAccessToken) {
         return reply.code(StatusCodes.UNAUTHORIZED).send({
           success: false,
-          error: "RD Station CRM não conectado. Autorize novamente através das configurações do agente.",
+          error:
+            "RD Station CRM não conectado. Autorize novamente através das configurações do agente.",
           needsAuthorization: true,
         });
       }
