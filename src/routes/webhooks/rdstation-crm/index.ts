@@ -48,16 +48,16 @@ const dealDocumentSchema = z.object({
   deal_stage: dealStageSchema.optional().nullable(),
   deal_pipeline: dealPipelineSchema.optional().nullable(),
   deal_source: z.object({
-    id: z.string(),
-    name: z.string(),
+    id: z.string().optional(),
+    name: z.string().optional(),
   }).optional().nullable(),
   campaign: z.object({
-    id: z.string(),
-    name: z.string(),
+    id: z.string().optional(),
+    name: z.string().optional(),
   }).optional().nullable(),
   deal_lost_reason: z.object({
-    id: z.string(),
-    name: z.string(),
+    id: z.string().optional(),
+    name: z.string().optional(),
   }).optional().nullable(),
   deal_custom_fields: z.array(z.object({
     value: z.any(),
