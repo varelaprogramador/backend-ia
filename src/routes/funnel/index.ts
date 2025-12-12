@@ -752,6 +752,7 @@ export default async function (fastify: FastifyInstance) {
       }
 
       // Se funil vinculado ao RD Station e tem configIaId, criar webhooks automaticamente
+      // IMPORTANTE: Se falhar, deletar o funil e retornar erro
       let rdstationWebhookIds: string[] = [];
       if (funnelData.rdstationPipelineId && funnelData.configIaId) {
         try {
@@ -775,24 +776,41 @@ export default async function (fastify: FastifyInstance) {
             funnelId: funnel.id,
           });
 
-          // Atualizar funil com IDs dos webhooks
-          if (rdstationWebhookIds.length > 0) {
-            await db.funnel.update({
-              where: { id: funnel.id },
-              data: { rdstationWebhookIds },
-            });
+          // Se nenhum webhook foi criado, é um erro crítico
+          if (rdstationWebhookIds.length === 0) {
+            throw new Error("Nenhum webhook foi criado. O RD Station pode estar com instabilidade. Tente novamente em alguns minutos.");
           }
+
+          // Atualizar funil com IDs dos webhooks
+          await db.funnel.update({
+            where: { id: funnel.id },
+            data: { rdstationWebhookIds },
+          });
 
           logInfo("RD Station webhooks created for funnel", {
             funnelId: funnel.id,
             webhookIds: rdstationWebhookIds,
           });
         } catch (webhookError: any) {
-          // Não falhar a criação do funil se o webhook falhar
-          logWarn("Failed to create RD Station webhooks, funnel created without webhooks", {
+          // Deletar o funil criado pois os webhooks falharam
+          logError("Failed to create RD Station webhooks, rolling back funnel creation", {
             funnelId: funnel.id,
             error: webhookError.message,
           });
+
+          try {
+            await db.funnel.delete({ where: { id: funnel.id } });
+            logInfo("Funnel rolled back due to webhook failure", { funnelId: funnel.id });
+          } catch (deleteError: any) {
+            logError("Failed to rollback funnel", { funnelId: funnel.id, error: deleteError.message });
+          }
+
+          return reply.code(503).send(
+            formatResponse({
+              success: false,
+              error: `Erro ao criar webhooks no RD Station: ${webhookError.message}. O RD Station pode estar com instabilidade. Tente novamente em alguns minutos ou crie o funil sem vincular ao RD Station.`,
+            })
+          );
         }
       }
 
@@ -908,6 +926,7 @@ export default async function (fastify: FastifyInstance) {
       }
 
       // Criar novos webhooks se vinculando a um novo pipeline
+      // IMPORTANTE: Se falhar, barrar a atualização e retornar erro
       const isLinkingNewPipeline = data.rdstationPipelineId &&
         (!currentFunnel?.rdstationPipelineId || isChangingPipeline);
       const configIaId = data.configIaId || currentFunnel?.configIaId;
@@ -934,20 +953,30 @@ export default async function (fastify: FastifyInstance) {
             funnelId: id,
           });
 
-          if (newWebhookIds.length > 0) {
-            data.rdstationWebhookIds = newWebhookIds;
-            webhookMessage = " e webhooks RD Station configurados";
+          // Se nenhum webhook foi criado, é um erro crítico
+          if (newWebhookIds.length === 0) {
+            throw new Error("Nenhum webhook foi criado. O RD Station pode estar com instabilidade. Tente novamente em alguns minutos.");
           }
+
+          data.rdstationWebhookIds = newWebhookIds;
+          webhookMessage = " e webhooks RD Station configurados";
 
           logInfo("RD Station webhooks created for updated funnel", {
             funnelId: id,
             webhookIds: newWebhookIds,
           });
         } catch (webhookError: any) {
-          logWarn("Failed to create RD Station webhooks for updated funnel", {
+          logError("Failed to create RD Station webhooks for updated funnel", {
             funnelId: id,
             error: webhookError.message,
           });
+
+          return reply.code(503).send(
+            formatResponse({
+              success: false,
+              error: `Erro ao criar webhooks no RD Station: ${webhookError.message}. O RD Station pode estar com instabilidade. Tente novamente em alguns minutos ou atualize sem vincular ao RD Station.`,
+            })
+          );
         }
       }
 
