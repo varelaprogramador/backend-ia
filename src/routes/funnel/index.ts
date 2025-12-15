@@ -1572,7 +1572,7 @@ export default async function (fastify: FastifyInstance) {
   fastify.post("/lead/:leadId/send-follow-up", async (request, reply) => {
     try {
       const { leadId } = request.params as { leadId: string };
-      const { message } = request.body as { message?: string };
+      const { message, useAI = true } = request.body as { message?: string; useAI?: boolean };
 
       const lead = await db.funnelLead.findUnique({
         where: { id: leadId },
@@ -1601,30 +1601,299 @@ export default async function (fastify: FastifyInstance) {
         );
       }
 
-      // Create follow-up history entry
+      // Verificar se há instância Evolution disponível
+      // PRIORIDADE: Lead > Agente (usa a instância onde o lead já está conversando)
+      const evolutionInstanceId = lead.evolutionInstanceId || agent.evolutionInstanceId;
+      if (!evolutionInstanceId) {
+        return reply.code(400).send(
+          formatResponse({
+            success: false,
+            error: "Nenhuma instância Evolution configurada para o agente ou lead",
+          })
+        );
+      }
+
+      // Buscar instância Evolution
+      const evolutionInstance = await db.evolutionInstance.findFirst({
+        where: {
+          OR: [
+            { id: evolutionInstanceId },
+            { instanceName: evolutionInstanceId },
+          ],
+        },
+      });
+
+      if (!evolutionInstance) {
+        return reply.code(400).send(
+          formatResponse({
+            success: false,
+            error: "Instância Evolution não encontrada",
+          })
+        );
+      }
+
+      // Obter telefone do lead
+      const leadPhone = lead.phone?.replace(/\D/g, "");
+      if (!leadPhone) {
+        return reply.code(400).send(
+          formatResponse({
+            success: false,
+            error: "Lead não possui telefone cadastrado",
+          })
+        );
+      }
+
+      // Determinar a mensagem a enviar
+      let finalMessage = message;
+
+      // Se não há mensagem e useAI é true, gerar com IA
+      if (!finalMessage && useAI) {
+        // Buscar API Key (do agente ou da credencial)
+        let apiKey = agent.openaiApiKey;
+        if (!apiKey && agent.credentialId) {
+          const credential = await db.credential.findUnique({
+            where: { id: agent.credentialId },
+            select: { data: true },
+          });
+          if (credential?.data) {
+            const credData = typeof credential.data === "string"
+              ? JSON.parse(credential.data)
+              : credential.data;
+            apiKey = credData.apiKey || credData.openaiApiKey;
+          }
+        }
+
+        if (!apiKey) {
+          return reply.code(400).send(
+            formatResponse({
+              success: false,
+              error: "Nenhuma API Key OpenAI configurada para gerar mensagem com IA",
+            })
+          );
+        }
+
+        // Importar OpenAI dinamicamente
+        const OpenAI = (await import("openai")).default;
+        const openai = new OpenAI({ apiKey });
+
+        // Buscar histórico de conversas para contexto
+        const phoneNormalized = leadPhone.replace(/\D/g, "");
+        const myMessages = await db.myMessages.findMany({
+          where: {
+            OR: [
+              { chatId: { contains: phoneNormalized } },
+              { senderId: { contains: phoneNormalized } },
+            ],
+            instanceName: evolutionInstance.instanceName,
+          },
+          orderBy: { timestamp: "desc" },
+          take: 10,
+          select: { message: true, direction: true, timestamp: true },
+        });
+
+        // Buscar follow-ups anteriores
+        const previousFollowUps = await db.followUpHistory.findMany({
+          where: { leadId, status: "sent" },
+          orderBy: { createdAt: "desc" },
+          take: 5,
+          select: { message: true },
+        });
+
+        const previousMessages = previousFollowUps.map(f => f.message).filter(Boolean);
+
+        // Formatar histórico
+        let conversationContext = "";
+        if (myMessages.length > 0) {
+          conversationContext = "\n\n📝 HISTÓRICO DE CONVERSAS ANTERIORES:\n";
+          const sortedMessages = [...myMessages].reverse();
+          for (const msg of sortedMessages) {
+            if (msg.message && msg.message.trim()) {
+              const sender = msg.direction === "received" ? "Cliente" : "Atendente";
+              conversationContext += `[${sender}]: ${msg.message}\n`;
+            }
+          }
+        }
+
+        // Formatar follow-ups anteriores
+        let previousFollowUpsContext = "";
+        if (previousMessages.length > 0) {
+          previousFollowUpsContext = "\n\n🚫 MENSAGENS DE FOLLOW-UP JÁ ENVIADAS (NÃO REPITA ESTAS):\n";
+          previousMessages.forEach((msg, index) => {
+            previousFollowUpsContext += `${index + 1}. "${msg}"\n`;
+          });
+        }
+
+        // Construir prompt
+        const systemMessage = agent.systemPrompt ||
+          "Você é um assistente de vendas profissional. Gere mensagens de follow-up personalizadas, amigáveis e que incentivem o cliente a responder.";
+
+        const followUpInstructions = agent.followUpPrompt ||
+          "Gere uma mensagem de follow-up curta e direta para o WhatsApp.";
+
+        const userPrompt = `
+Gere uma mensagem de follow-up ÚNICA e PERSONALIZADA para WhatsApp.
+
+📊 CONTEXTO DO LEAD:
+- Nome: ${lead.name}
+- Etapa atual: ${lead.stage?.name || "Sem etapa"}
+${lead.notes ? `- Notas sobre o cliente: ${lead.notes}` : ""}
+${lead.contexto ? `\n📌 CONTEXTO IMPORTANTE DO LEAD:\n${lead.contexto}\n` : ""}
+${conversationContext}
+${previousFollowUpsContext}
+
+📝 INSTRUÇÕES ESPECÍFICAS DO AGENTE:
+${followUpInstructions}
+
+⚠️ REGRAS OBRIGATÓRIAS:
+1. A mensagem DEVE ser completamente diferente das anteriores listadas acima
+2. Máximo 2-3 frases curtas e diretas
+3. NÃO use saudações genéricas como "Olá!", "Oi!", "Bom dia!"
+4. Personalize com o nome "${lead.name}" de forma natural
+5. Inclua uma pergunta ou call-to-action para incentivar resposta
+6. NÃO mencione que é um follow-up automático
+
+Responda APENAS com a mensagem final, sem explicações ou formatação extra.
+`;
+
+        const completion = await openai.chat.completions.create({
+          model: agent.model || "gpt-4o-mini",
+          messages: [
+            { role: "system", content: systemMessage },
+            { role: "user", content: userPrompt },
+          ],
+          temperature: agent.temperature || 0.7,
+          max_tokens: agent.maxTokens || 200,
+        });
+
+        finalMessage = completion.choices[0]?.message?.content?.trim();
+
+        if (!finalMessage) {
+          return reply.code(500).send(
+            formatResponse({
+              success: false,
+              error: "IA não conseguiu gerar uma mensagem",
+            })
+          );
+        }
+
+        logInfo("AI message generated for manual follow-up", {
+          leadName: lead.name,
+          messageLength: finalMessage.length,
+        });
+      }
+
+      if (!finalMessage) {
+        return reply.code(400).send(
+          formatResponse({
+            success: false,
+            error: "Mensagem é obrigatória quando useAI é false",
+          })
+        );
+      }
+
+      // Enviar mensagem via Evolution API
+      const axios = (await import("axios")).default;
+
+      // Usar whatsappJid do lead se disponível (chat já aberto)
+      const remoteJid = lead.whatsappJid
+        ? (lead.whatsappJid.includes("@s.whatsapp.net") ? lead.whatsappJid : `${lead.whatsappJid.replace(/\D/g, "")}@s.whatsapp.net`)
+        : `${leadPhone}@s.whatsapp.net`;
+
+      // Buscar sessionId existente para manter continuidade do chat
+      let existingSessionId: string | null = null;
+      const existingMyMessage = await db.myMessages.findFirst({
+        where: {
+          OR: [
+            { chatId: remoteJid },
+            ...(lead.whatsappJid ? [{ chatId: lead.whatsappJid }] : []),
+            { chatId: { contains: leadPhone } },
+          ],
+          instanceName: evolutionInstance.instanceName,
+        },
+        orderBy: { timestamp: "desc" },
+        select: { sessionId: true },
+      });
+
+      if (existingMyMessage?.sessionId) {
+        existingSessionId = existingMyMessage.sessionId;
+      }
+
+      const sessionId = existingSessionId || `manual-followup-${remoteJid}-${Date.now()}`;
+
+      const evolutionUrl = `${evolutionInstance.serverUrl}/message/sendText/${evolutionInstance.instanceName}`;
+
+      const evolutionResponse = await axios.post(
+        evolutionUrl,
+        {
+          number: leadPhone,
+          text: finalMessage,
+        },
+        {
+          headers: {
+            "Content-Type": "application/json",
+            apikey: evolutionInstance.apiKey,
+          },
+          timeout: 30000,
+        }
+      );
+
+      const messageId = evolutionResponse.data?.key?.id || `manual-followup-${Date.now()}`;
+
+      // Salvar mensagem enviada no MyMessages
+      await db.myMessages.create({
+        data: {
+          sessionId: sessionId,
+          message: finalMessage,
+          direction: "sent",
+          messageId: messageId,
+          instanceName: evolutionInstance.instanceName,
+          chatId: remoteJid,
+          senderId: evolutionInstance.instanceName,
+          timestamp: new Date(),
+          isAiResponse: useAI,
+        },
+      });
+
+      // Create follow-up history entry com status "sent"
       const followUp = await db.followUpHistory.create({
         data: {
           leadId,
           agentId: agent.id,
-          message: message || "Follow-up manual",
-          status: "pending",
+          message: finalMessage,
+          status: "sent",
         },
       });
 
-      // TODO: Integrate with OpenAI and Evolution API to send actual message
-      // This is a placeholder for the actual implementation
+      logInfo("Manual follow-up sent successfully", {
+        leadId,
+        agentId: agent.id,
+        messageId,
+        sessionId,
+        usedAI: useAI,
+        usedExistingSession: !!existingSessionId,
+      });
 
-      logInfo("Follow-up triggered", { leadId, agentId: agent.id });
       return formatResponse({
-        data: followUp,
-        message: "Follow-up enviado para processamento",
+        data: {
+          followUp,
+          messageId,
+          message: finalMessage,
+          sessionId,
+        },
+        message: "Follow-up enviado com sucesso",
       });
     } catch (error: any) {
       logError("Error sending follow-up", error);
+
+      // Log detalhes se for erro do axios
+      if (error.response?.data) {
+        logError("Evolution API error details", error.response.data);
+      }
+
       return reply.code(500).send(
         formatResponse({
           success: false,
-          error: "Erro ao enviar follow-up",
+          error: `Erro ao enviar follow-up: ${error.response?.data?.message || error.message}`,
         })
       );
     }

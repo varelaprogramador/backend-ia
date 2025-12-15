@@ -648,7 +648,7 @@ Responda APENAS com a mensagem final, sem explicações ou formatação extra.
             take: 5, // Últimas 5 mensagens de follow-up
             select: { message: true },
           });
-          const previousFollowUps = previousFollowUpContacts.map(c => c.message);
+          const previousFollowUps = previousFollowUpContacts.map(c => c.message).filter((m): m is string => m !== null);
 
           // Calcular dias desde último contato
           const lastContactDate = leadInFlow.lastFollowUpAt || leadInFlow.enteredAt;
