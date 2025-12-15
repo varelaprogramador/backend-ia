@@ -128,6 +128,7 @@ export class FollowUpFlowCronService {
   /**
    * Gera mensagem de follow-up usando OpenAI
    * Inclui histórico de conversas para contexto mais relevante
+   * Evita repetição de mensagens anteriores
    */
   private async generateAIMessage(
     agent: {
@@ -148,7 +149,11 @@ export class FollowUpFlowCronService {
     },
     stepName: string,
     followUpCount: number,
-    messageHistory: { role: "user" | "assistant"; content: string; timestamp: Date }[] = []
+    messageHistory: { role: "user" | "assistant"; content: string; timestamp: Date }[] = [],
+    previousFollowUps: string[] = [],
+    daysSinceLastContact: number = 0,
+    currentStepOrder: number = 0,
+    totalSteps: number = 0
   ): Promise<string | null> {
     try {
       // Buscar API Key (do agente ou da credencial)
@@ -192,28 +197,81 @@ export class FollowUpFlowCronService {
         conversationContext += "\n---\n";
       }
 
+      // Formatar mensagens de follow-up anteriores para evitar repetição
+      let previousFollowUpsContext = "";
+      if (previousFollowUps.length > 0) {
+        previousFollowUpsContext = "\n\n🚫 MENSAGENS DE FOLLOW-UP JÁ ENVIADAS (NÃO REPITA ESTAS):\n";
+        previousFollowUps.forEach((msg, index) => {
+          previousFollowUpsContext += `${index + 1}. "${msg}"\n`;
+        });
+        previousFollowUpsContext += "\n---\n";
+      }
+
+      // Determinar tom baseado nos dias sem contato
+      let urgencyTone = "";
+      if (daysSinceLastContact <= 1) {
+        urgencyTone = "Tom: Leve e casual, como uma lembrança amigável.";
+      } else if (daysSinceLastContact <= 3) {
+        urgencyTone = "Tom: Interessado e prestativo, mostrando que você está disponível.";
+      } else if (daysSinceLastContact <= 7) {
+        urgencyTone = "Tom: Gentil mas demonstrando interesse genuíno em ajudar.";
+      } else {
+        urgencyTone = "Tom: Respeitoso e compreensivo, reconhecendo que a pessoa pode estar ocupada.";
+      }
+
+      // Determinar abordagem baseada na etapa
+      let stepApproach = "";
+      if (currentStepOrder === 1) {
+        stepApproach = "Abordagem: Primeiro follow-up - seja amigável e relembre brevemente o contexto inicial.";
+      } else if (currentStepOrder === 2) {
+        stepApproach = "Abordagem: Segundo follow-up - traga um novo ângulo ou benefício que não foi mencionado antes.";
+      } else if (currentStepOrder >= 3 && currentStepOrder < totalSteps - 1) {
+        stepApproach = "Abordagem: Follow-up intermediário - seja criativo, use uma pergunta diferente ou compartilhe algo de valor.";
+      } else {
+        stepApproach = "Abordagem: Último follow-up - seja direto mas respeitoso, deixe a porta aberta para contato futuro.";
+      }
+
       const userPrompt = `
-Gere uma mensagem de follow-up para WhatsApp com as seguintes informações:
+Gere uma mensagem de follow-up ÚNICA e PERSONALIZADA para WhatsApp.
 
-Cliente: ${lead.name}
-Etapa atual: ${stepName}
-Número de follow-ups anteriores: ${followUpCount}
-${lead.notes ? `Notas sobre o cliente: ${lead.notes}` : ""}
+📊 CONTEXTO DO LEAD:
+- Nome: ${lead.name}
+- Etapa atual: ${stepName} (etapa ${currentStepOrder + 1} de ${totalSteps})
+- Número de follow-ups anteriores: ${followUpCount}
+- Dias desde último contato: ${daysSinceLastContact} dia(s)
+${lead.notes ? `- Notas sobre o cliente: ${lead.notes}` : ""}
 ${lead.contexto ? `\n📌 CONTEXTO IMPORTANTE DO LEAD:\n${lead.contexto}\n` : ""}
+
+🎯 DIRETRIZES DE TOM E ABORDAGEM:
+- ${urgencyTone}
+- ${stepApproach}
 ${conversationContext}
-Instruções específicas: ${followUpInstructions}
+${previousFollowUpsContext}
 
-IMPORTANTE:
-- Mensagem curta e direta (máximo 2-3 frases)
-- Tom amigável e profissional
-- Não use saudações genéricas como "Olá!" no início
-- Personalize com o nome do cliente
-- ${lead.contexto ? "USE O CONTEXTO DO LEAD para personalizar a mensagem com base nos interesses e informações específicas do cliente" : ""}
-- ${messageHistory.length > 0 ? "CONSIDERE O HISTÓRICO DE CONVERSAS para dar continuidade ao assunto e não repetir informações já discutidas" : ""}
-- Faça uma pergunta ou call-to-action para incentivar resposta
-- Não mencione que é um follow-up automático
+📝 INSTRUÇÕES ESPECÍFICAS DO AGENTE:
+${followUpInstructions}
 
-Responda APENAS com a mensagem, sem explicações ou formatação extra.
+⚠️ REGRAS OBRIGATÓRIAS:
+1. A mensagem DEVE ser completamente diferente das anteriores listadas acima
+2. Máximo 2-3 frases curtas e diretas
+3. NÃO use saudações genéricas como "Olá!", "Oi!", "Bom dia!"
+4. Personalize com o nome "${lead.name}" de forma natural
+5. ${lead.contexto ? "USE O CONTEXTO DO LEAD para personalizar com base nos interesses específicos" : "Seja relevante e interessante"}
+6. ${messageHistory.length > 0 ? "CONSIDERE O HISTÓRICO para dar continuidade sem repetir" : "Crie uma abertura interessante"}
+7. Inclua uma pergunta ou call-to-action para incentivar resposta
+8. NÃO mencione que é um follow-up automático ou que "não obteve resposta"
+9. Seja criativo - use diferentes abordagens: pergunta, curiosidade, benefício, exclusividade
+10. ${daysSinceLastContact > 7 ? "Reconheça sutilmente que faz tempo, sem ser invasivo" : "Mantenha a conversa fluindo naturalmente"}
+
+💡 IDEIAS PARA VARIAR (escolha uma abordagem diferente das mensagens anteriores):
+- Fazer uma pergunta sobre a necessidade/dor do cliente
+- Mencionar um benefício específico não citado antes
+- Criar senso de oportunidade ou exclusividade
+- Oferecer ajuda de forma genuína
+- Compartilhar uma dica ou informação útil relacionada
+- Usar curiosidade para engajar
+
+Responda APENAS com a mensagem final, sem explicações ou formatação extra.
 `;
 
       const completion = await openai.chat.completions.create({
@@ -222,7 +280,7 @@ Responda APENAS com a mensagem, sem explicações ou formatação extra.
           { role: "system", content: systemMessage },
           { role: "user", content: userPrompt },
         ],
-        temperature: agent.temperature || 0.7,
+        temperature: Math.min((agent.temperature || 0.7) + 0.1, 1.0), // Aumenta levemente a criatividade
         max_tokens: agent.maxTokens || 200,
       });
 
@@ -239,6 +297,10 @@ Responda APENAS com a mensagem, sem explicações ou formatação extra.
         tokensUsed: completion.usage?.total_tokens,
         hasConversationContext: messageHistory.length > 0,
         contextMessagesCount: messageHistory.length,
+        previousFollowUpsCount: previousFollowUps.length,
+        daysSinceLastContact,
+        currentStepOrder,
+        totalSteps,
       });
 
       return message;
@@ -250,11 +312,16 @@ Responda APENAS com a mensagem, sem explicações ou formatação extra.
 
   /**
    * Envia mensagem via Evolution API
+   * @param instanceId - ID ou nome da instância Evolution
+   * @param phone - Telefone do lead
+   * @param message - Mensagem a enviar
+   * @param whatsappJid - JID do WhatsApp do lead (se já tem chat aberto)
    */
   private async sendWhatsAppMessage(
     instanceId: string,
     phone: string,
-    message: string
+    message: string,
+    whatsappJid?: string | null
   ): Promise<{ success: boolean; messageId?: string; error?: string }> {
     try {
       // Buscar instância do Evolution
@@ -271,11 +338,63 @@ Responda APENAS com a mensagem, sem explicações ou formatação extra.
         return { success: false, error: "Evolution instance not found" };
       }
 
-      // Formatar número para WhatsApp
+      // Usar o whatsappJid do lead se disponível (chat já aberto)
+      // Senão, formatar o número para WhatsApp
       const formattedPhone = phone.replace(/\D/g, "");
-      const remoteJid = formattedPhone.includes("@s.whatsapp.net")
-        ? formattedPhone
-        : `${formattedPhone}@s.whatsapp.net`;
+      const remoteJid = whatsappJid
+        ? (whatsappJid.includes("@s.whatsapp.net") ? whatsappJid : `${whatsappJid.replace(/\D/g, "")}@s.whatsapp.net`)
+        : (formattedPhone.includes("@s.whatsapp.net") ? formattedPhone : `${formattedPhone}@s.whatsapp.net`);
+
+      // Buscar sessionId existente do chat para manter continuidade
+      // PRIORIDADE: Busca pelo whatsappJid do lead (chat já aberto)
+      let existingSessionId: string | null = null;
+
+      const existingMyMessage = await db.myMessages.findFirst({
+        where: {
+          OR: [
+            { chatId: remoteJid },
+            ...(whatsappJid ? [{ chatId: whatsappJid }] : []),
+            { chatId: { contains: formattedPhone } },
+          ],
+          instanceName: instance.instanceName,
+        },
+        orderBy: { timestamp: "desc" },
+        select: { sessionId: true, chatId: true },
+      });
+
+      if (existingMyMessage?.sessionId) {
+        existingSessionId = existingMyMessage.sessionId;
+      } else {
+        // Tentar buscar em n8nChatMemory
+        const existingChatMemory = await db.n8nChatMemory.findFirst({
+          where: {
+            OR: [
+              { chatId: remoteJid },
+              ...(whatsappJid ? [{ chatId: whatsappJid }] : []),
+              { chatId: { contains: formattedPhone } },
+            ],
+            instanceName: instance.instanceName,
+          },
+          orderBy: { timestamp: "desc" },
+          select: { sessionId: true, chatId: true },
+        });
+
+        if (existingChatMemory?.sessionId) {
+          existingSessionId = existingChatMemory.sessionId;
+        }
+      }
+
+      // Usar sessionId existente ou criar um novo baseado no chatId
+      const sessionId = existingSessionId || `followup-${remoteJid}-${Date.now()}`;
+
+      logInfo("Preparing to send WhatsApp message", {
+        hasWhatsappJid: !!whatsappJid,
+        whatsappJid,
+        remoteJid,
+        formattedPhone,
+        usedExistingSession: !!existingSessionId,
+        sessionId,
+      });
 
       // Enviar via Evolution API
       const evolutionUrl = `${instance.serverUrl}/message/sendText/${instance.instanceName}`;
@@ -297,10 +416,10 @@ Responda APENAS com a mensagem, sem explicações ou formatação extra.
 
       const messageId = response.data?.key?.id || `followup-${Date.now()}`;
 
-      // Salvar mensagem enviada no MyMessages
+      // Salvar mensagem enviada no MyMessages usando o sessionId existente
       await db.myMessages.create({
         data: {
-          sessionId: "follow-up-cron",
+          sessionId: sessionId,
           message: message,
           direction: "sent",
           messageId: messageId,
@@ -316,6 +435,8 @@ Responda APENAS com a mensagem, sem explicações ou formatação extra.
         instanceName: instance.instanceName,
         phone: formattedPhone,
         messageId,
+        sessionId,
+        usedExistingSession: !!existingSessionId,
       });
 
       return { success: true, messageId };
@@ -483,7 +604,8 @@ Responda APENAS com a mensagem, sem explicações ou formatação extra.
           }
 
           // Verificar instância do Evolution
-          const evolutionInstanceId = agent.evolutionInstanceId || leadInFlow.lead.evolutionInstanceId;
+          // PRIORIDADE: Lead > Agente (usa a instância onde o lead já está conversando)
+          const evolutionInstanceId = leadInFlow.lead.evolutionInstanceId || agent.evolutionInstanceId;
           if (!evolutionInstanceId) {
             logWarn(`No Evolution instance configured for follow-up`);
             stats.skipped++;
@@ -501,6 +623,12 @@ Responda APENAS com a mensagem, sem explicações ou formatação extra.
             select: { instanceName: true },
           });
 
+          logInfo(`Using Evolution instance for lead ${leadInFlow.lead.name}`, {
+            instanceId: evolutionInstanceId,
+            instanceName: evolutionInstance?.instanceName,
+            source: leadInFlow.lead.evolutionInstanceId ? "lead" : "agent",
+          });
+
           // Buscar histórico de mensagens para contexto
           const messageHistory = await this.getMessageHistory(
             leadInFlow.lead.whatsappJid,
@@ -509,17 +637,48 @@ Responda APENAS com a mensagem, sem explicações ou formatação extra.
             15 // Últimas 15 mensagens para contexto
           );
 
+          // Buscar mensagens de follow-up anteriores para evitar repetição
+          const previousFollowUpContacts = await db.followUpFlowContact.findMany({
+            where: {
+              leadId: leadInFlow.leadId,
+              isAutomatic: true,
+              status: "sent",
+            },
+            orderBy: { createdAt: "desc" },
+            take: 5, // Últimas 5 mensagens de follow-up
+            select: { message: true },
+          });
+          const previousFollowUps = previousFollowUpContacts.map(c => c.message);
+
+          // Calcular dias desde último contato
+          const lastContactDate = leadInFlow.lastFollowUpAt || leadInFlow.enteredAt;
+          const daysSinceLastContact = lastContactDate
+            ? Math.floor((Date.now() - lastContactDate.getTime()) / (1000 * 60 * 60 * 24))
+            : 0;
+
+          // Contar total de etapas do funil para contexto
+          const totalSteps = await db.followUpFlowStep.count({
+            where: {
+              funnelId: leadInFlow.funnelId,
+              type: "followup",
+            },
+          });
+
           // Gerar mensagem com IA
           let message: string | null = null;
 
           if (agent.autoFollowUp) {
-            // Usar IA para gerar mensagem personalizada com contexto do histórico
+            // Usar IA para gerar mensagem personalizada com contexto completo
             message = await this.generateAIMessage(
               agent,
               leadInFlow.lead,
               leadInFlow.currentStep.name,
               leadInFlow.followUpCount,
-              messageHistory
+              messageHistory,
+              previousFollowUps,
+              daysSinceLastContact,
+              leadInFlow.currentStep.order,
+              totalSteps
             );
           }
 
@@ -538,11 +697,12 @@ Responda APENAS com a mensagem, sem explicações ou formatação extra.
           message = message.replace(/\{nome\}/gi, leadInFlow.lead.name);
           message = message.replace(/\{name\}/gi, leadInFlow.lead.name);
 
-          // Enviar via WhatsApp
+          // Enviar via WhatsApp (usando whatsappJid do lead se disponível - chat já aberto)
           const sendResult = await this.sendWhatsAppMessage(
             evolutionInstanceId,
             leadPhone,
-            message
+            message,
+            leadInFlow.lead.whatsappJid // Passa o JID do chat já aberto
           );
 
           if (!sendResult.success) {
