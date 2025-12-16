@@ -377,6 +377,7 @@ model Funnel {
   // Vinculacao com Pipeline do Kommo (via agente)
   kommoPipelineId   String?  // ID do pipeline no Kommo
   kommoPipelineName String?  // Nome do pipeline (para exibicao)
+  kommoWebhookId    String?  // ID do webhook criado no Kommo
 
   // Vinculacao com Pipeline do RD Station CRM (via agente)
   rdstationPipelineId   String?  // ID do pipeline/funil no RD Station
@@ -412,6 +413,9 @@ model FunnelStage {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // Integração com Kommo CRM
+  kommoStageId String? // ID do estágio (status_id) correspondente no Kommo CRM
+
   // Integração com RD Station CRM
   rdstationStageId String? // ID do estágio correspondente no RD Station CRM
 
@@ -420,6 +424,7 @@ model FunnelStage {
 
   @@index([funnelId])
   @@index([order])
+  @@index([kommoStageId])
   @@index([rdstationStageId])
   @@map("funnel_stages")
 }
@@ -451,6 +456,9 @@ model FunnelLead {
   whatsappProfilePic  String? // URL da foto do perfil
   evolutionInstanceId String? // ID da instância Evolution vinculada
 
+  // Integração com Kommo CRM
+  kommoLeadId       Int?     @unique // ID do lead correspondente no Kommo CRM
+
   // Integração com RD Station CRM
   rdstationDealId   String?  @unique // ID do deal correspondente no RD Station CRM
 
@@ -479,6 +487,7 @@ model FunnelLead {
   @@index([email])
   @@index([whatsappJid])
   @@index([isInFollowUpFlow])
+  @@index([kommoLeadId])
   @@index([rdstationDealId])
   @@map("funnel_leads")
 }

@@ -197,20 +197,21 @@ async function getFixedStage(funnelId: string, type: "won" | "lost"): Promise<st
 
 async function handleDealCreated(
   payload: z.infer<typeof webhookPayloadSchema>,
-  pipelineId: string,
+  funnelId: string,
   fastify: FastifyInstance
 ) {
   const document = dealDocumentSchema.parse(payload.document);
 
-  // Buscar funil vinculado ao pipeline do RD Station usando o pipelineId da URL
-  const funnel = await db.funnel.findFirst({
-    where: { rdstationPipelineId: pipelineId },
+  // Buscar funil diretamente pelo ID (não pelo rdstationPipelineId)
+  // A URL usa funnelId do nosso sistema, não o pipelineId do CRM
+  const funnel = await db.funnel.findUnique({
+    where: { id: funnelId },
     include: { stages: { orderBy: { order: "asc" } } },
   });
 
   if (!funnel) {
-    logInfo("No funnel linked to RD Station pipeline", {
-      pipelineId,
+    logInfo("Funnel not found", {
+      funnelId,
       documentPipelineId: document.deal_pipeline?.id,
       pipelineName: document.deal_pipeline?.name,
     });
@@ -294,7 +295,6 @@ async function handleDealCreated(
     leadId: lead.id,
     dealId: document.id,
     funnelId: funnel.id,
-    pipelineId,
     stageName: document.deal_stage?.name,
     websocketEmitted: true,
   });
@@ -302,7 +302,7 @@ async function handleDealCreated(
 
 async function handleDealUpdated(
   payload: z.infer<typeof webhookPayloadSchema>,
-  pipelineId: string,
+  funnelId: string,
   fastify: FastifyInstance
 ) {
   const document = dealDocumentSchema.parse(payload.document);
@@ -314,9 +314,9 @@ async function handleDealUpdated(
   });
 
   if (!lead) {
-    logInfo("No lead found for deal update, attempting to create", { dealId: document.id, pipelineId });
+    logInfo("No lead found for deal update, attempting to create", { dealId: document.id, funnelId });
     // Tentar criar o lead se nao existir
-    await handleDealCreated(payload, pipelineId, fastify);
+    await handleDealCreated(payload, funnelId, fastify);
     return;
   }
 
@@ -408,7 +408,7 @@ async function handleDealUpdated(
   logInfo("Lead updated from RD Station webhook", {
     leadId: lead.id,
     dealId: document.id,
-    pipelineId,
+    funnelId,
     status: document.status,
     stageChanged,
     newStageId: updateData.stageId,
@@ -418,7 +418,7 @@ async function handleDealUpdated(
 
 async function handleDealDeleted(
   payload: z.infer<typeof webhookPayloadSchema>,
-  pipelineId: string,
+  funnelId: string,
   fastify: FastifyInstance
 ) {
   const document = deletedDocumentSchema.parse(payload.document);
@@ -429,11 +429,11 @@ async function handleDealDeleted(
   });
 
   if (!lead) {
-    logInfo("No lead found for deleted deal", { dealId: document.id, pipelineId });
+    logInfo("No lead found for deleted deal", { dealId: document.id, funnelId });
     return;
   }
 
-  const funnelId = lead.funnelId;
+  const leadFunnelId = lead.funnelId;
   const leadId = lead.id;
 
   // Deletar lead e registros relacionados
@@ -444,24 +444,24 @@ async function handleDealDeleted(
   // Emitir evento WebSocket para atualização em tempo real
   const wsPayload: FunnelWebSocketPayload = {
     event: "funnel:lead:deleted",
-    funnelId,
+    funnelId: leadFunnelId,
     leadId,
     data: {
       rdstationDealId: document.id,
     },
   };
-  fastify.io.to(`funnel:${funnelId}`).emit("funnel:update", wsPayload);
+  fastify.io.to(`funnel:${leadFunnelId}`).emit("funnel:update", wsPayload);
 
   logInfo("Lead deleted from RD Station webhook", {
     leadId,
     dealId: document.id,
     dealName: document.name,
-    pipelineId,
+    funnelId,
     websocketEmitted: true,
   });
 }
 
-async function handleLostReasonEvent(payload: z.infer<typeof webhookPayloadSchema>, pipelineId: string) {
+async function handleLostReasonEvent(payload: z.infer<typeof webhookPayloadSchema>, funnelId: string) {
   const document = lostReasonDocumentSchema.parse(payload.document);
 
   // Apenas logar para auditoria - lost_reasons nao afetam dados locais diretamente
@@ -469,7 +469,7 @@ async function handleLostReasonEvent(payload: z.infer<typeof webhookPayloadSchem
     event: payload.event_name,
     reasonId: document.id,
     reasonName: document.name,
-    pipelineId,
+    funnelId,
     timestamp: payload.event_timestamp,
   });
 }
@@ -480,10 +480,13 @@ async function handleLostReasonEvent(payload: z.infer<typeof webhookPayloadSchem
 
 export default async function (fastify: FastifyInstance) {
   /**
-   * Webhook RD Station CRM v2 com pipelineId dinâmico
+   * Webhook RD Station CRM v2 com funnelId dinâmico
    * Recebe eventos de deals e lost_reasons
    *
-   * URL: /webhooks/:pipelineId/rdstation
+   * URL: /webhooks/:funnelId/rdstation
+   *
+   * IMPORTANTE: A URL usa funnelId do nosso sistema, não o pipelineId do CRM
+   * Isso evita URLs duplicadas quando múltiplos funis usam o mesmo pipeline do CRM
    *
    * Eventos suportados:
    * - crm_deal_created: Cria FunnelLead no funil vinculado
@@ -503,20 +506,19 @@ export default async function (fastify: FastifyInstance) {
         },
       });
 
-      // Extrair pipelineId da URL
-      // Fastify autoload usa o nome da pasta com underscores: _pipelineId_ -> pipelineId_
-      const params = request.params as { pipelineId_?: string; pipelineId?: string };
-      const pipelineId = params.pipelineId_ || params.pipelineId;
+      // Extrair funnelId da URL (parâmetro vem como funnelId_ pelo Fastify autoload)
+      const params = request.params as { funnelId_?: string; funnelId?: string };
+      const funnelId = params.funnelId_ || params.funnelId;
 
-      if (!pipelineId) {
-        logWarn("Webhook received without pipelineId", {
+      if (!funnelId) {
+        logWarn("Webhook received without funnelId", {
           params: request.params,
           url: request.url,
         });
         return reply.code(400).send(
           formatResponse({
             success: false,
-            error: "Missing pipelineId parameter",
+            error: "Missing funnelId parameter",
           })
         );
       }
@@ -527,7 +529,7 @@ export default async function (fastify: FastifyInstance) {
         payload = webhookPayloadSchema.parse(request.body);
       } catch (zodError: any) {
         logError("Webhook payload validation failed", {
-          pipelineId,
+          funnelId,
           body: request.body,
           zodErrors: zodError.errors,
         });
@@ -542,48 +544,48 @@ export default async function (fastify: FastifyInstance) {
 
       logInfo("RD Station CRM webhook received", {
         event: payload.event_name,
-        pipelineId,
+        funnelId,
         transactionId: payload.transaction_uuid,
         timestamp: payload.event_timestamp,
       });
 
       switch (payload.event_name) {
         case "crm_deal_created":
-          await handleDealCreated(payload, pipelineId, fastify);
+          await handleDealCreated(payload, funnelId, fastify);
           break;
 
         case "crm_deal_updated":
-          await handleDealUpdated(payload, pipelineId, fastify);
+          await handleDealUpdated(payload, funnelId, fastify);
           break;
 
         case "crm_deal_deleted":
-          await handleDealDeleted(payload, pipelineId, fastify);
+          await handleDealDeleted(payload, funnelId, fastify);
           break;
 
         case "crm_lost_reason_created":
         case "crm_lost_reason_updated":
         case "crm_lost_reason_deleted":
-          await handleLostReasonEvent(payload, pipelineId);
+          await handleLostReasonEvent(payload, funnelId);
           break;
 
         default:
-          logWarn("Unknown RD Station webhook event", { event: payload.event_name, pipelineId });
+          logWarn("Unknown RD Station webhook event", { event: payload.event_name, funnelId });
       }
 
       return formatResponse({
         message: "Webhook processed successfully",
         data: {
           transactionId: payload.transaction_uuid,
-          pipelineId,
+          funnelId,
         },
       });
     } catch (error: any) {
-      const params = request.params as { pipelineId_?: string; pipelineId?: string };
-      const pipelineId = params.pipelineId_ || params.pipelineId;
+      const params = request.params as { funnelId_?: string; funnelId?: string };
+      const funnelId = params.funnelId_ || params.funnelId;
 
       logError("Error processing RD Station webhook", {
         error: error.message,
-        pipelineId,
+        funnelId,
         body: request.body,
       });
 
@@ -601,14 +603,14 @@ export default async function (fastify: FastifyInstance) {
 
   /**
    * Rota de teste para verificar se o webhook está funcionando
-   * POST /webhooks/:pipelineId/rdstation/teste
+   * POST /webhooks/:funnelId/rdstation/teste
    */
   fastify.post("/teste", async (request) => {
-    const params = request.params as { pipelineId_?: string; pipelineId?: string };
-    const pipelineId = params.pipelineId_ || params.pipelineId;
+    const params = request.params as { funnelId_?: string; funnelId?: string };
+    const funnelId = params.funnelId_ || params.funnelId;
 
     logInfo("Webhook test received", {
-      pipelineId,
+      funnelId,
       body: request.body,
       headers: request.headers,
     });
@@ -616,7 +618,7 @@ export default async function (fastify: FastifyInstance) {
     return formatResponse({
       message: "Webhook test received successfully",
       data: {
-        pipelineId,
+        funnelId,
         receivedAt: new Date().toISOString(),
         body: request.body,
       },
@@ -624,26 +626,26 @@ export default async function (fastify: FastifyInstance) {
   });
 
   /**
-   * Health check para o webhook com pipelineId
+   * Health check para o webhook com funnelId
    * Util para verificar se o endpoint esta ativo
    */
   fastify.get("/health", async (request) => {
-    const params = request.params as { pipelineId_?: string; pipelineId?: string };
-    const pipelineId = params.pipelineId_ || params.pipelineId;
+    const params = request.params as { funnelId_?: string; funnelId?: string };
+    const funnelId = params.funnelId_ || params.funnelId;
 
-    // Verificar se existe funil vinculado a esse pipeline
-    const funnel = await db.funnel.findFirst({
-      where: { rdstationPipelineId: pipelineId },
-      select: { id: true, name: true },
+    // Verificar se o funil existe
+    const funnel = await db.funnel.findUnique({
+      where: { id: funnelId },
+      select: { id: true, name: true, rdstationPipelineId: true },
     });
 
     return formatResponse({
       message: "RD Station CRM webhook is active",
       data: {
-        pipelineId,
-        funnelLinked: !!funnel,
-        funnelId: funnel?.id,
+        funnelId,
+        funnelExists: !!funnel,
         funnelName: funnel?.name,
+        rdstationPipelineId: funnel?.rdstationPipelineId,
         supportedEvents: [
           "crm_deal_created",
           "crm_deal_updated",

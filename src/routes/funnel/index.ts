@@ -5,6 +5,7 @@ import { formatResponse } from "@/utils/response-formatter";
 import { logError, logInfo, logWarn } from "@/utils/logger";
 import { rdstationWebhookService } from "@/services/rdstation-webhook.service";
 import { rdstationDealsService } from "@/services/rdstation-deals.service";
+import { kommoWebhookService } from "@/services/kommo-webhook.service";
 import { notificationService } from "@/services/notification-service";
 
 // ========================================
@@ -59,6 +60,7 @@ const funnelSchema = z.object({
   kommoPipelineId: z.string().optional().nullable(),
   kommoPipelineName: z.string().optional().nullable(),
   kommoStages: z.array(kommoStageSchema).optional().default([]),
+  kommoWebhookId: z.string().optional().nullable(), // ID do webhook criado no Kommo
   // Vinculacao com Pipeline do RD Station CRM
   rdstationPipelineId: z.string().optional().nullable(),
   rdstationPipelineName: z.string().optional().nullable(),
@@ -817,6 +819,58 @@ export default async function (fastify: FastifyInstance) {
         }
       }
 
+      // Se funil vinculado ao Kommo e tem configIaId, criar webhook automaticamente
+      // IMPORTANTE: Se falhar, deletar o funil e retornar erro
+      let kommoWebhookId: string | null = null;
+      if (funnelData.kommoPipelineId && funnelData.configIaId) {
+        try {
+          logInfo("Creating Kommo webhook for funnel", {
+            funnelId: funnel.id,
+            configIaId: funnelData.configIaId,
+            pipelineId: funnelData.kommoPipelineId,
+          });
+
+          kommoWebhookId = await kommoWebhookService.createWebhookForFunnel({
+            configIaId: funnelData.configIaId,
+            funnelId: funnel.id,
+            pipelineId: funnelData.kommoPipelineId,
+          });
+
+          if (kommoWebhookId) {
+            // Atualizar funil com ID do webhook
+            await db.funnel.update({
+              where: { id: funnel.id },
+              data: { kommoWebhookId },
+            });
+
+            logInfo("Kommo webhook created for funnel", {
+              funnelId: funnel.id,
+              webhookId: kommoWebhookId,
+            });
+          }
+        } catch (webhookError: any) {
+          // Deletar o funil criado pois os webhooks falharam
+          logError("Failed to create Kommo webhook, rolling back funnel creation", {
+            funnelId: funnel.id,
+            error: webhookError.message,
+          });
+
+          try {
+            await db.funnel.delete({ where: { id: funnel.id } });
+            logInfo("Funnel rolled back due to Kommo webhook failure", { funnelId: funnel.id });
+          } catch (deleteError: any) {
+            logError("Failed to rollback funnel", { funnelId: funnel.id, error: deleteError.message });
+          }
+
+          return reply.code(503).send(
+            formatResponse({
+              success: false,
+              error: `Erro ao criar webhook no Kommo. Verifique se você tem permissão de administrador na conta Kommo e tente novamente.`,
+            })
+          );
+        }
+      }
+
       // Fetch updated funnel with stages and leads
       const updatedFunnel = await db.funnel.findUnique({
         where: { id: funnel.id },
@@ -828,6 +882,14 @@ export default async function (fastify: FastifyInstance) {
         },
       });
 
+      // Construir mensagem de sucesso
+      const webhookMessages: string[] = [];
+      if (rdstationWebhookIds.length > 0) webhookMessages.push("RD Station");
+      if (kommoWebhookId) webhookMessages.push("Kommo");
+      const webhookMessage = webhookMessages.length > 0
+        ? ` e webhooks ${webhookMessages.join(" e ")} configurados`
+        : "";
+
       logInfo("Funnel created", {
         funnelId: funnel.id,
         userId: data.userId,
@@ -835,13 +897,12 @@ export default async function (fastify: FastifyInstance) {
         rdstationStagesCount: rdstationStages?.length || 0,
         rdstationDealsCount: rdstationDeals?.length || 0,
         rdstationWebhooksCount: rdstationWebhookIds.length,
+        kommoWebhookId,
       });
       return reply.code(201).send(
         formatResponse({
           data: updatedFunnel,
-          message: rdstationWebhookIds.length > 0
-            ? "Funil criado com sucesso e webhooks RD Station configurados"
-            : "Funil criado com sucesso",
+          message: `Funil criado com sucesso${webhookMessage}`,
         })
       );
     } catch (error: any) {
@@ -879,12 +940,14 @@ export default async function (fastify: FastifyInstance) {
       const { id } = request.params as { id: string };
       const data = updateFunnelSchema.parse(request.body);
 
-      // Buscar funil atual para verificar mudanças no RD Station
+      // Buscar funil atual para verificar mudanças no RD Station e Kommo
       const currentFunnel = await db.funnel.findUnique({
         where: { id },
         select: {
           rdstationPipelineId: true,
           rdstationWebhookIds: true,
+          kommoPipelineId: true,
+          kommoWebhookId: true,
           configIaId: true,
         },
       });
@@ -984,6 +1047,90 @@ export default async function (fastify: FastifyInstance) {
         }
       }
 
+      // =========== KOMMO WEBHOOK HANDLING ===========
+      // Verificar se o pipeline do Kommo está sendo desvinculado ou alterado
+      const isUnlinkingKommo = currentFunnel?.kommoPipelineId &&
+        (data.kommoPipelineId === null || data.kommoPipelineId === "");
+      const isChangingKommoPipeline = currentFunnel?.kommoPipelineId &&
+        data.kommoPipelineId &&
+        data.kommoPipelineId !== currentFunnel.kommoPipelineId;
+
+      // Deletar webhook antigo se desvinculando ou trocando pipeline do Kommo
+      if ((isUnlinkingKommo || isChangingKommoPipeline) &&
+          currentFunnel?.kommoWebhookId &&
+          currentFunnel.configIaId) {
+        try {
+          logInfo("Deleting Kommo webhook due to pipeline change", {
+            funnelId: id,
+            oldPipelineId: currentFunnel.kommoPipelineId,
+            newPipelineId: data.kommoPipelineId,
+            webhookId: currentFunnel.kommoWebhookId,
+          });
+
+          await kommoWebhookService.deleteWebhook(currentFunnel.configIaId, currentFunnel.kommoWebhookId);
+
+          // Limpar ID do webhook se desvinculando
+          if (isUnlinkingKommo) {
+            data.kommoWebhookId = null;
+          }
+
+          webhookMessage += webhookMessage.includes("RD Station")
+            ? " e Kommo"
+            : " e webhook Kommo removido";
+          logInfo("Kommo webhook deleted due to pipeline change", { funnelId: id });
+        } catch (webhookError: any) {
+          logWarn("Failed to delete old Kommo webhook", {
+            funnelId: id,
+            error: webhookError.message,
+          });
+        }
+      }
+
+      // Criar novo webhook se vinculando a um novo pipeline do Kommo
+      const isLinkingNewKommoPipeline = data.kommoPipelineId &&
+        (!currentFunnel?.kommoPipelineId || isChangingKommoPipeline);
+      const kommoConfigIaId = data.configIaId || currentFunnel?.configIaId;
+
+      if (isLinkingNewKommoPipeline && kommoConfigIaId) {
+        try {
+          logInfo("Creating Kommo webhook for new pipeline link", {
+            funnelId: id,
+            pipelineId: data.kommoPipelineId,
+            configIaId: kommoConfigIaId,
+          });
+
+          const newWebhookId = await kommoWebhookService.createWebhookForFunnel({
+            configIaId: kommoConfigIaId,
+            funnelId: id,
+            pipelineId: data.kommoPipelineId!,
+          });
+
+          if (newWebhookId) {
+            data.kommoWebhookId = newWebhookId;
+            webhookMessage += webhookMessage.includes("RD Station") || webhookMessage.includes("Kommo removido")
+              ? " e Kommo"
+              : " e webhook Kommo configurado";
+
+            logInfo("Kommo webhook created for updated funnel", {
+              funnelId: id,
+              webhookId: newWebhookId,
+            });
+          }
+        } catch (webhookError: any) {
+          logError("Failed to create Kommo webhook for updated funnel", {
+            funnelId: id,
+            error: webhookError.message,
+          });
+
+          return reply.code(503).send(
+            formatResponse({
+              success: false,
+              error: `Erro ao criar webhook no Kommo: ${webhookError.message}. Verifique suas permissões e tente novamente.`,
+            })
+          );
+        }
+      }
+
       const funnel = await db.funnel.update({
         where: { id },
         data,
@@ -1014,11 +1161,13 @@ export default async function (fastify: FastifyInstance) {
     try {
       const { id } = request.params as { id: string };
 
-      // Buscar funil para verificar se tem webhooks do RD Station
+      // Buscar funil para verificar se tem webhooks do RD Station ou Kommo
       const funnel = await db.funnel.findUnique({
         where: { id },
         select: {
           rdstationWebhookIds: true,
+          kommoWebhookId: true,
+          kommoPipelineId: true,
           configIaId: true,
         },
       });
@@ -1040,6 +1189,28 @@ export default async function (fastify: FastifyInstance) {
         } catch (webhookError: any) {
           // Não impedir a exclusão do funil se falhar a deleção dos webhooks
           logWarn("Failed to delete RD Station webhooks, proceeding with funnel deletion", {
+            funnelId: id,
+            error: webhookError.message,
+          });
+        }
+      }
+
+      // Deletar webhook do Kommo antes de excluir o funil
+      if (funnel?.kommoWebhookId && funnel.configIaId) {
+        try {
+          logInfo("Deleting Kommo webhook before funnel deletion", {
+            funnelId: id,
+            webhookId: funnel.kommoWebhookId,
+          });
+
+          await kommoWebhookService.deleteWebhook(funnel.configIaId, funnel.kommoWebhookId);
+
+          logInfo("Kommo webhook deleted for funnel", {
+            funnelId: id,
+          });
+        } catch (webhookError: any) {
+          // Não impedir a exclusão do funil se falhar a deleção do webhook
+          logWarn("Failed to delete Kommo webhook, proceeding with funnel deletion", {
             funnelId: id,
             error: webhookError.message,
           });

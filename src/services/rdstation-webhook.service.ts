@@ -103,17 +103,18 @@ export class RDStationWebhookService {
 
   /**
    * Gera a URL do webhook baseado no ambiente
-   * @param pipelineId - ID do pipeline do RD Station (opcional, usa formato antigo se não fornecido)
+   * @param funnelId - ID do funil do sistema (não o pipelineId do CRM!)
    */
-  private getWebhookUrl(pipelineId?: string): string {
+  private getWebhookUrl(funnelId?: string): string {
     // Em producao, usar a URL configurada
     // Em desenvolvimento, pode usar ngrok ou similar
     const baseUrl = ENV.APP_URL || "http://localhost:3333";
 
-    // Se temos pipelineId, usar novo formato com rota dinâmica
-    // Formato: /webhooks/[pipelineId]/rdstation
-    if (pipelineId) {
-      return `${baseUrl}/webhooks/${pipelineId}/rdstation`;
+    // IMPORTANTE: Usamos funnelId na URL, não pipelineId do CRM
+    // Formato: /webhooks/[funnelId]/rdstation
+    // Isso evita URLs duplicadas quando múltiplos funis usam o mesmo pipeline
+    if (funnelId) {
+      return `${baseUrl}/webhooks/${funnelId}/rdstation`;
     }
 
     // Fallback para formato antigo (compatibilidade)
@@ -137,8 +138,8 @@ export class RDStationWebhookService {
       );
     }
 
-    // Usar URL customizada, ou gerar com pipelineId, ou fallback para URL antiga
-    const url = webhookUrl || this.getWebhookUrl(pipelineId);
+    // IMPORTANTE: Usar funnelId na URL, não pipelineId do CRM
+    const url = webhookUrl || this.getWebhookUrl(funnelId);
     const createdWebhookIds: string[] = [];
 
     // Gera o nome do webhook: "agentName + funnelId"
@@ -390,14 +391,14 @@ export class RDStationWebhookService {
    */
   async verifyWebhooks(
     configIaId: string,
-    pipelineId?: string
+    funnelId?: string
   ): Promise<{
     isConfigured: boolean;
     missingEvents: string[];
     configuredEvents: string[];
   }> {
     const webhooks = await this.listWebhooks(configIaId);
-    const webhookUrl = this.getWebhookUrl(pipelineId);
+    const webhookUrl = this.getWebhookUrl(funnelId);
 
     const configuredEvents = webhooks
       .filter((w) => w.url === webhookUrl)
@@ -421,10 +422,10 @@ export class RDStationWebhookService {
   async ensureWebhooksConfigured(
     configIaId: string,
     agentName?: string,
-    funnelId?: string,
-    pipelineId?: string
+    funnelId?: string
   ): Promise<string[]> {
-    const verification = await this.verifyWebhooks(configIaId, pipelineId);
+    // IMPORTANTE: Usar funnelId para verificar, não pipelineId do CRM
+    const verification = await this.verifyWebhooks(configIaId, funnelId);
 
     if (verification.isConfigured) {
       logInfo("RD Station webhooks already configured", {
@@ -445,7 +446,8 @@ export class RDStationWebhookService {
       throw new Error("RD Station não está conectado");
     }
 
-    const webhookUrl = this.getWebhookUrl(pipelineId);
+    // IMPORTANTE: Usar funnelId na URL, não pipelineId
+    const webhookUrl = this.getWebhookUrl(funnelId);
     const createdIds: string[] = [];
 
     // Gera o nome do webhook: "agentName + funnelId"
